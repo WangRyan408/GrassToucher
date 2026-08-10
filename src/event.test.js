@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_PER_LIST, applyRsvp, fromEmbed, toEmbed } from './event.js';
+import {
+  CANCELLED_SUFFIX,
+  COLOR_CANCELLED,
+  MAX_PER_LIST,
+  applyRsvp,
+  cancelRecipients,
+  displayTitle,
+  embedColor,
+  fromEmbed,
+  toEmbed,
+} from './event.js';
 
 const sample = (over = {}) => ({
   title: 'Touch Grass',
@@ -9,6 +19,7 @@ const sample = (over = {}) => ({
   startsAt: new Date('2026-08-15T17:30:00.000Z'),
   organizerId: '111111111111111111',
   reminded: false,
+  cancelled: false,
   rsvp: { going: ['111111111111111111', '222222222222222222'], maybe: ['333333333333333333'], no: [] },
   ...over,
 });
@@ -45,6 +56,52 @@ test('a full list of attendees still round-trips inside the field limit', () => 
 
   assert.ok(field.value.length <= 1024, `field was ${field.value.length} chars`);
   assert.deepEqual(fromEmbed(embed).rsvp.going, going);
+});
+
+test('a cancelled event round-trips with a clean title', () => {
+  const event = sample({ cancelled: true });
+  const rendered = toEmbed(event).toJSON();
+
+  assert.ok(rendered.title.endsWith(CANCELLED_SUFFIX), rendered.title);
+  assert.equal(rendered.color, COLOR_CANCELLED);
+  assert.deepEqual(roundTrip(event), event); // Title comes back without the marker.
+});
+
+test('re-rendering a cancelled event does not stack the marker', () => {
+  const once = toEmbed(sample({ cancelled: true })).toJSON();
+  const twice = toEmbed(fromEmbed(once)).toJSON();
+
+  assert.equal(twice.title, once.title);
+  assert.equal(twice.title.match(/CANCELLED/g).length, 1);
+});
+
+test('cancelled outranks past when picking the colour', () => {
+  const past = new Date('2020-01-01T00:00:00.000Z');
+  assert.equal(embedColor(sample({ startsAt: past, cancelled: true })), COLOR_CANCELLED);
+});
+
+test('displayTitle truncates the title, never the marker', () => {
+  const long = 'g'.repeat(100);
+  const shown = displayTitle(sample({ title: long, cancelled: true }), 100);
+
+  assert.equal(shown.length, 100);
+  assert.ok(shown.endsWith(CANCELLED_SUFFIX), shown);
+});
+
+test('cancellation notifies everyone who might turn up, except whoever cancelled', () => {
+  const event = sample({
+    organizerId: 'organizer',
+    rsvp: { going: ['organizer', 'goer'], maybe: ['maybe'], no: ['declined'] },
+  });
+
+  assert.deepEqual(cancelRecipients(event, 'organizer'), ['goer', 'maybe']);
+  // A mod cancelling someone else's event still tells the organizer, exactly once.
+  assert.deepEqual(cancelRecipients(event, 'mod'), ['organizer', 'goer', 'maybe']);
+});
+
+test('cancellation recipients survive an event with no organizer in the footer', () => {
+  const event = sample({ organizerId: null, rsvp: { going: ['goer'], maybe: [], no: [] } });
+  assert.deepEqual(cancelRecipients(event, 'mod'), ['goer']);
 });
 
 test('rsvp adds, moves, and withdraws', () => {

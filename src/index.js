@@ -8,7 +8,7 @@ import {
   time,
 } from 'discord.js';
 import { rebuildDigest } from './digest.js';
-import { COLOR_PAST, ensureOpen, toEmbed } from './event.js';
+import { embedColor, ensureOpen, toEmbed } from './event.js';
 import { commands, route } from './interactions.js';
 import { isValidTimeZone } from './time.js';
 
@@ -72,7 +72,7 @@ async function sweep(ctx) {
   for (const { thread, message, event } of entries) {
     const untilStart = event.startsAt.getTime() - now;
 
-    if (!event.reminded && untilStart >= 0 && untilStart <= reminderMs) {
+    if (!event.cancelled && !event.reminded && untilStart >= 0 && untilStart <= reminderMs) {
       await ensureOpen(thread);
       const invitees = [...event.rsvp.going, ...event.rsvp.maybe];
       const who = invitees.length ? invitees.map((id) => `<@${id}>`).join(' ') : '';
@@ -83,7 +83,9 @@ async function sweep(ctx) {
     }
 
     if (untilStart < -graceMs && !thread.archived) {
-      if (message.embeds[0]?.color !== COLOR_PAST) {
+      // Compare against the colour toEmbed would pick, not a fixed constant: a cancelled
+      // event stays red forever, and a mismatched test here re-edits it every sweep.
+      if (message.embeds[0]?.color !== embedColor(event)) {
         await message.edit({ embeds: [toEmbed(event)] }); // Re-renders grey now it's past.
       }
       await thread.setArchived(true, 'Event finished');
@@ -115,6 +117,19 @@ client.once(Events.ClientReady, async () => {
         ).catch(() => {});
       }
     }
+  });
+
+  // Deleting a post is how you really cancel an event, so it shouldn't wait out the sweep.
+  // Debounced because clearing out several posts fires one event each, and every rebuild
+  // re-reads the whole forum.
+  let pending;
+  client.on(Events.ThreadDelete, (thread) => {
+    if (thread.parentId !== ctx.forum.id) return;
+    clearTimeout(pending);
+    pending = setTimeout(
+      () => rebuildDigest(ctx).catch((error) => console.error('Rebuild after delete failed:', error)),
+      1500,
+    );
   });
 
   const tick = () => sweep(ctx).catch((error) => console.error('Sweep failed:', error));

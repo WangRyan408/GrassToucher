@@ -22,14 +22,18 @@ export function renderDigest(entries) {
   }
 
   const lines = entries.slice(0, MAX_LINES).map(({ thread, event }) => {
-    const bits = [
-      `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`,
-      `${CHOICES.going.emoji} ${event.rsvp.going.length}`,
-    ];
-    if (event.where) bits.push(`📍 ${event.where}`);
+    const when = `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`;
     // Brackets in a title would break out of the markdown link.
     const label = event.title.replaceAll('[', '(').replaceAll(']', ')');
-    return `**[${label}](${thread.url})**\n${bits.join(' · ')}`;
+    const link = `[${label}](${thread.url})`;
+
+    // An embed description is one of the few places strikethrough actually renders, so
+    // this is where a cancellation reads as one. RSVP count and location are moot now.
+    if (event.cancelled) return `~~**${link}**~~ **CANCELLED**\n${when}`;
+
+    const bits = [when, `${CHOICES.going.emoji} ${event.rsvp.going.length}`];
+    if (event.where) bits.push(`📍 ${event.where}`);
+    return `**${link}**\n${bits.join(' · ')}`;
   });
 
   const hidden = entries.length - lines.length;

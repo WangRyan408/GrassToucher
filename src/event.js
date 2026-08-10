@@ -12,6 +12,10 @@ export const MARKER = 'GrassToucher';
 
 export const COLOR_UPCOMING = 0x57f287;
 export const COLOR_PAST = 0x4f545c;
+export const COLOR_CANCELLED = 0xed4245;
+
+/** Appended to the embed title and thread name. Presentation only — the footer is the truth. */
+export const CANCELLED_SUFFIX = ' — CANCELLED';
 
 /**
  * ponytail: attendee lists live in embed fields, which cap at 1024 chars — about 44
@@ -43,14 +47,36 @@ export function rsvpRow() {
 const mentions = (ids) => (ids.length ? ids.map((id) => `<@${id}>`).join(' ') : '—');
 const readIds = (value) => [...value.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]);
 
+/**
+ * The one place the embed colour is decided, so the sweep can ask "does this need a
+ * re-render?" without duplicating the rule and looping forever when it guesses wrong.
+ */
+export function embedColor(event) {
+  if (event.cancelled) return COLOR_CANCELLED; // Outranks past-grey.
+  return new Date(event.startsAt).getTime() < Date.now() ? COLOR_PAST : COLOR_UPCOMING;
+}
+
+/** Title as shown in the embed and thread name. Truncates the title, never the marker. */
+export function displayTitle(event, cap) {
+  if (!event.cancelled) return event.title.slice(0, cap);
+  return event.title.slice(0, cap - CANCELLED_SUFFIX.length) + CANCELLED_SUFFIX;
+}
+
+/** Who hears about a cancellation: everyone who might turn up, minus whoever cancelled it. */
+export function cancelRecipients(event, actorId) {
+  const ids = new Set([...event.rsvp.going, ...event.rsvp.maybe, event.organizerId]);
+  ids.delete(actorId);
+  ids.delete(null);
+  return [...ids];
+}
+
 /** Build the starter-message embed that stores the event. */
 export function toEmbed(event) {
   const startsAt = new Date(event.startsAt);
-  const past = startsAt.getTime() < Date.now();
 
   const embed = new EmbedBuilder()
-    .setTitle(event.title.slice(0, 256))
-    .setColor(past ? COLOR_PAST : COLOR_UPCOMING)
+    .setTitle(displayTitle(event, 256))
+    .setColor(embedColor(event))
     .setTimestamp(startsAt)
     .addFields({
       name: 'When',
@@ -70,6 +96,7 @@ export function toEmbed(event) {
 
   const footer = [MARKER, `org:${event.organizerId}`];
   if (event.reminded) footer.push('reminded');
+  if (event.cancelled) footer.push('cancelled');
   return embed.setFooter({ text: footer.join(' · ') });
 }
 
@@ -82,13 +109,21 @@ export function fromEmbed(embed) {
   const footer = embed.footer?.text ?? '';
   const byEmoji = (emoji) => fields.find((f) => f.name.startsWith(emoji))?.value ?? '';
 
+  // Undo displayTitle. Skip this and every re-render appends another marker.
+  const cancelled = footer.includes('cancelled');
+  let title = embed.title ?? '(untitled)';
+  if (cancelled && title.endsWith(CANCELLED_SUFFIX)) {
+    title = title.slice(0, -CANCELLED_SUFFIX.length);
+  }
+
   return {
-    title: embed.title ?? '(untitled)',
+    title,
     description: embed.description ?? null,
     startsAt: new Date(embed.timestamp),
     where: fields.find((f) => f.name === 'Where')?.value ?? null,
     organizerId: /org:(\d+)/.exec(footer)?.[1] ?? null,
     reminded: footer.includes('reminded'),
+    cancelled,
     rsvp: Object.fromEntries(
       Object.entries(CHOICES).map(([key, c]) => [key, readIds(byEmoji(c.emoji))]),
     ),

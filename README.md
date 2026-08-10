@@ -60,14 +60,32 @@ there's no deploy step.
 |---|---|
 | `/event create title: when: [where:] [description:] [timezone:]` | `when` is `YYYY-MM-DD HH:MM` on a 24-hour clock. `timezone` is an IANA name like `Europe/Berlin`, defaulting to `DEFAULT_TZ`. |
 | `/event edit [title:] [when:] [where:] [description:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. |
+| `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
 
 Times are stored as an instant and rendered with Discord's own timestamp markup, so
 everyone reads them in their own local timezone.
 
-**To cancel an event, delete its forum post.** The post is the record, so deleting it is the
-cancellation — there's no command for it. Archiving does *not* cancel: archived posts stay
-in the digest on purpose, because forum posts auto-archive after a week of quiet and an
-event nobody chats in shouldn't vanish.
+## Cancelling
+
+`/event cancel` keeps the post. It renames it to `Title — CANCELLED`, turns the embed red,
+strikes the title through, drops the RSVP buttons, and DMs Going + Maybe (plus the organizer)
+with the event name, the server, the old start time, and a link back to the thread. The digest
+keeps the event listed but struck through until its start time passes, so anyone who missed the
+DM still sees what happened instead of wondering where the event went.
+
+The DM is best effort. A member who has "allow direct messages from server members" switched
+off just won't get one — the confirmation tells you how many couldn't be reached.
+
+**To remove an event entirely, delete its forum post.** The post is the record, so deleting it
+erases the event; cancelling only marks it. The digest catches up a second or two later — the
+bot watches for thread deletions instead of waiting for its next sweep. Archiving does *not*
+cancel: archived posts stay in
+the digest on purpose, because forum posts auto-archive after a week of quiet and an event
+nobody chats in shouldn't vanish.
+
+Only the organizer or someone with Manage Threads can edit or cancel. Note that the *bot*
+authors every event post, so Discord's own "delete post" is a mod-only action here — which is
+why cancelling is a command rather than something you do from the post's context menu.
 
 ## Development
 
@@ -85,7 +103,7 @@ and the embed⇄event codec. Everything else is Discord I/O.
 | `src/index.js` | Config validation, boot, interaction routing, the 10-minute sweep |
 | `src/event.js` | The model: embed codec, forum listing, RSVP rules |
 | `src/digest.js` | Renders the digest and edits the pin in place |
-| `src/interactions.js` | Slash command definitions and handlers |
+| `src/interactions.js` | Slash command definitions, handlers, cancellation DMs |
 | `src/time.js` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
 
 ### If embeds come back empty
