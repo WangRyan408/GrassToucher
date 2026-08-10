@@ -38,20 +38,47 @@ export function renderDigest(entries) {
   return embed.setDescription(lines.join('\n\n').slice(0, 4096));
 }
 
+async function pinQuietly(message) {
+  if (message.pinned) return;
+  try {
+    await message.pin();
+  } catch (error) {
+    console.error(
+      `Could not pin the digest (${error.message}). Grant the bot Pin Messages in ` +
+        'that channel — Manage Messages is not enough, Discord split pinning into its own ' +
+        'permission. The digest still updates in place meanwhile.',
+    );
+  }
+}
+
 /**
- * Edit the bot's pinned digest in place, or post and pin it if there isn't one.
- * The pin *is* the lookup key, so no message id is stored anywhere and a restart or
- * redeploy picks the same message back up.
+ * Edit the bot's digest in place, or post one if it doesn't exist yet.
+ *
+ * The pin is the lookup key, so no message id is stored anywhere and a restart picks the
+ * same message back up. The recent-message fallback matters because that key can go away:
+ * a moderator unpins it, or the bot lacks Pin Messages. Without the fallback, a digest
+ * we can't find is a digest we post again on every single sweep.
  */
 export async function upsertDigest(channel, entries) {
   const embed = renderDigest(entries);
-  const { items } = await channel.messages.fetchPins();
-  const existing = items.map((pin) => pin.message).find((m) => isDigest(m, channel.client.user.id));
+  const me = channel.client.user.id;
 
-  if (existing) return existing.edit({ embeds: [embed] });
+  const { items } = await channel.messages.fetchPins();
+  let existing = items.map((pin) => pin.message).find((m) => isDigest(m, me));
+
+  if (!existing) {
+    const recent = await channel.messages.fetch({ limit: 50 });
+    existing = recent.find((m) => isDigest(m, me));
+  }
+
+  if (existing) {
+    await existing.edit({ embeds: [embed] });
+    await pinQuietly(existing);
+    return existing;
+  }
 
   const sent = await channel.send({ embeds: [embed] });
-  await sent.pin();
+  await pinQuietly(sent);
   return sent;
 }
 

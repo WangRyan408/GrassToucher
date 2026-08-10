@@ -22,11 +22,15 @@ No privileged intents are needed — leave all three toggles off.
 Replace `YOUR_APP_ID` and open:
 
 ```
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot%20applications.commands&permissions=326417607680
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot%20applications.commands&permissions=2252126231284736
 ```
 
 That grants View Channel, Send Messages, Send Messages in Threads, Create Public Threads,
-Manage Threads, Manage Messages (to pin the digest), Embed Links, and Read Message History.
+Manage Threads, **Pin Messages**, Embed Links, and Read Message History.
+
+Pin Messages is its own permission now — Discord split it out of Manage Messages, and the
+current pins endpoint only accepts the new one. If the log says it can't pin the digest,
+this is why.
 
 **3. Make two channels**
 
