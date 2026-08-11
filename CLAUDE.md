@@ -48,26 +48,20 @@ change cost, in the voice of the rows already there.
 
 ## Where things stand — 2026-08-11
 
-*Delete this section once both branches below are merged.*
+*Delete this section once `feat/ci-and-deploy` is merged.*
 
-Two stacked branches, both pushed, **no PRs opened yet**. Nothing is on `main`.
+**On `main`** (merged as PR #4, `fa3aa5e`): bun is the toolchain and `bun.lock` the lockfile,
+the Dockerfile runs `oven/bun:1-alpine`, `timezone:` autocompletes from
+`Intl.supportedValuesOf('timeZone')` and takes loose input, and `src/interactions.ts` is split
+into `src/commands/{create,edit,cancel,shared}.ts`.
 
-`feat/timezone-autocomplete` — three commits off `main`:
+**Open: `feat/ci-and-deploy`**, pushed, two commits off `main`, **no PR opened yet**.
 
-1. `6482829` — scripts run on bun.
-2. `5d928e5` — `timezone:` autocompletes from `Intl.supportedValuesOf('timeZone')` and accepts
-   loose input, plus `src/interactions.ts` split into `src/commands/{create,edit,cancel,shared}.ts`.
-3. `98827f4` — `bun.lock` in, `package-lock.json` out, Dockerfile moved to `oven/bun:1-alpine`.
-
-`feat/ci-and-deploy` — branched off that one, not off `main`, because the workflows assume the
-bun Dockerfile and the GHCR image name from commit 3. Off `main` they would be wrong. So it is
-either merged after `feat/timezone-autocomplete`, or its PR targets that branch.
-
-4. `0680df0` — the three workflows, `image: …:${TAG:-latest}` in `docker-compose.yaml`, and the
+1. `0680df0` — the three workflows, `image: …:${TAG:-latest}` in `docker-compose.yaml`, and the
    README's Deployment section. `.github/workflows/ci.yml` is `on: pull_request` +
    `workflow_call` only: `publish.yml` calls it, so a `push:` trigger would run the suite twice
    per merge.
-5. This file.
+2. `3298a0d` — this file.
 
 ### Three things nobody has verified
 
@@ -84,8 +78,8 @@ either merged after `feat/timezone-autocomplete`, or its PR targets that branch.
 
 ### Next steps
 
-1. Open the PRs — `ci.yml` runs on any PR, which is what proves the Dockerfile. Mind the
-   stacking: `feat/timezone-autocomplete` merges first, or `feat/ci-and-deploy` targets it.
+1. Open the PR for `feat/ci-and-deploy` → `main`. That is the first time `ci.yml` runs, and the
+   first time the Dockerfile is built anywhere.
 2. Human-only, can't be done from here: add the five deploy secrets, put the public key in the
    host's `authorized_keys`, and `docker login ghcr.io` there.
 3. Merge → Publish pushes the image → Deploy fires on its own. Check `docker compose ps` on the
