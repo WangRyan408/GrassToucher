@@ -1,0 +1,17 @@
+{
+  // Node runs these .ts files directly by stripping the types out, so tsc never emits —
+  // it only type-checks. `erasableSyntaxOnly` is what keeps that true: it rejects enums,
+  // runtime namespaces, parameter properties and decorators at check time rather than
+  // letting them fail at boot, because stripping can't generate the code they need.
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "esnext",
+    "module": "nodenext",
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

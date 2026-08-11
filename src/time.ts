@@ -1,6 +1,6 @@
 export const TIME_FORMAT = 'YYYY-MM-DD HH:MM';
 
-export function isValidTimeZone(tz) {
+export function isValidTimeZone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: tz });
     return true;
@@ -10,7 +10,7 @@ export function isValidTimeZone(tz) {
 }
 
 /** What UTC instant does the clock in `tz` read as, at instant `ts`? */
-function wallClockAsUTC(ts, tz) {
+function wallClockAsUTC(ts: number, tz: string): number {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     year: 'numeric',
@@ -20,7 +20,7 @@ function wallClockAsUTC(ts, tz) {
     minute: '2-digit',
     hourCycle: 'h23',
   }).formatToParts(new Date(ts));
-  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value] as const));
   // Some ICU builds render midnight as hour 24.
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute);
 }
@@ -34,8 +34,11 @@ function wallClockAsUTC(ts, tz) {
  * won't round-trip, and we reject it rather than silently shifting someone's event.
  *
  * Returns null on malformed input, an unknown timezone, or a nonexistent local time.
+ *
+ * `input` is `unknown` rather than `string`: it arrives from a Discord option that may be
+ * absent, and rejecting junk is the function's job.
  */
-export function zonedToDate(input, tz) {
+export function zonedToDate(input: unknown, tz: string): Date | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?$/.exec(String(input ?? '').trim());
   if (!m || !isValidTimeZone(tz)) return null;
 
