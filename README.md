@@ -59,7 +59,7 @@ there's no deploy step.
 | Command | Notes |
 |---|---|
 | `/event create title: when: [where:] [description:] [timezone:]` | `when` is `YYYY-MM-DD HH:MM` on a 24-hour clock. `timezone` is an IANA name like `Europe/Berlin`, defaulting to `DEFAULT_TZ`. |
-| `/event edit [title:] [when:] [where:] [description:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. |
+| `/event edit [title:] [when:] [where:] [description:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
 | `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
 
 Times are stored as an instant and rendered with Discord's own timestamp markup, so
@@ -75,6 +75,13 @@ DM still sees what happened instead of wondering where the event went.
 
 The DM is best effort. A member who has "allow direct messages from server members" switched
 off just won't get one — the confirmation tells you how many couldn't be reached.
+
+`/event edit uncancel: True` reverses all of that: the marker comes off the name and title, the
+embed goes back to green, the RSVP buttons return with everyone's answers intact, and the same
+people get a second DM saying it's back on. That correction is the point — anyone who read the
+first DM has already written the event off. Combine it with `when:` in the same command to
+reinstate an event at a new time, and the DM quotes the new one. No confirmation button here:
+un-cancelling isn't the destructive direction.
 
 **To remove an event entirely, delete its forum post.** The post is the record, so deleting it
 erases the event; cancelling only marks it. The digest catches up a second or two later — the
@@ -103,7 +110,7 @@ and the embed⇄event codec. Everything else is Discord I/O.
 | `src/index.js` | Config validation, boot, interaction routing, the 10-minute sweep |
 | `src/event.js` | The model: embed codec, forum listing, RSVP rules |
 | `src/digest.js` | Renders the digest and edits the pin in place |
-| `src/interactions.js` | Slash command definitions, handlers, cancellation DMs |
+| `src/interactions.js` | Slash command definitions, handlers, cancel/reinstate DMs |
 | `src/time.js` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
 
 ### If embeds come back empty

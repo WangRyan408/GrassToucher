@@ -3,12 +3,13 @@ import { test } from 'node:test';
 import {
   CANCELLED_SUFFIX,
   COLOR_CANCELLED,
+  COLOR_UPCOMING,
   MAX_PER_LIST,
   applyRsvp,
-  cancelRecipients,
   displayTitle,
   embedColor,
   fromEmbed,
+  notifyRecipients,
   toEmbed,
 } from './event.js';
 
@@ -75,6 +76,17 @@ test('re-rendering a cancelled event does not stack the marker', () => {
   assert.equal(twice.title.match(/CANCELLED/g).length, 1);
 });
 
+test('un-cancelling leaves no trace of the cancellation', () => {
+  // What /event edit uncancel does: read the post back, clear the flag, re-render.
+  const cancelled = fromEmbed(toEmbed(sample({ cancelled: true })).toJSON());
+  const back = toEmbed({ ...cancelled, cancelled: false }).toJSON();
+
+  assert.equal(back.title, 'Touch Grass');
+  assert.ok(!back.footer.text.includes('cancelled'), back.footer.text);
+  assert.equal(back.color, COLOR_UPCOMING);
+  assert.equal(displayTitle({ ...cancelled, cancelled: false }, 100), 'Touch Grass');
+});
+
 test('cancelled outranks past when picking the colour', () => {
   const past = new Date('2020-01-01T00:00:00.000Z');
   assert.equal(embedColor(sample({ startsAt: past, cancelled: true })), COLOR_CANCELLED);
@@ -88,23 +100,23 @@ test('displayTitle truncates the title, never the marker', () => {
   assert.ok(shown.endsWith(CANCELLED_SUFFIX), shown);
 });
 
-test('cancellation notifies everyone who might turn up, except whoever cancelled', () => {
+test('notifies everyone who might turn up, except whoever changed the plan', () => {
   const event = sample({
     organizerId: 'organizer',
     rsvp: { going: ['organizer', 'goer'], maybe: ['maybe'], no: ['declined'] },
   });
 
-  assert.deepEqual(cancelRecipients(event, 'organizer'), ['goer', 'maybe']);
+  assert.deepEqual(notifyRecipients(event, 'organizer'), ['goer', 'maybe']);
   // A mod cancelling someone else's event still tells the organizer, exactly once.
-  assert.deepEqual(cancelRecipients(event, 'mod'), ['organizer', 'goer', 'maybe']);
+  assert.deepEqual(notifyRecipients(event, 'mod'), ['organizer', 'goer', 'maybe']);
 });
 
-test('cancellation recipients survive an event with no organizer in the footer', () => {
+test('recipients survive an event with no organizer in the footer', () => {
   const event = sample({ organizerId: null, rsvp: { going: ['goer'], maybe: [], no: [] } });
-  assert.deepEqual(cancelRecipients(event, 'mod'), ['goer']);
+  assert.deepEqual(notifyRecipients(event, 'mod'), ['goer']);
 });
 
-test('rsvp adds, moves, and withdraws', () => {
+test('rsvp adds and moves', () => {
   const event = sample({ rsvp: { going: [], maybe: [], no: [] } });
 
   assert.equal(applyRsvp(event, 'u1', 'going'), 'added');
@@ -112,9 +124,17 @@ test('rsvp adds, moves, and withdraws', () => {
 
   assert.equal(applyRsvp(event, 'u1', 'maybe'), 'moved');
   assert.deepEqual(event.rsvp, { going: [], maybe: ['u1'], no: [] });
+});
 
-  assert.equal(applyRsvp(event, 'u1', 'maybe'), 'withdrawn');
-  assert.deepEqual(event.rsvp, { going: [], maybe: [], no: [] });
+test('re-picking the same answer is a no-op, not a withdrawal', () => {
+  for (const choice of ['going', 'maybe', 'no']) {
+    const event = sample({ rsvp: { going: [], maybe: [], no: [] } });
+    applyRsvp(event, 'u1', choice);
+
+    // The click that used to silently drop them off the list.
+    assert.equal(applyRsvp(event, 'u1', choice), 'unchanged', choice);
+    assert.deepEqual(event.rsvp[choice], ['u1'], `${choice} kept its member`);
+  }
 });
 
 test('a user never appears on two lists at once', () => {
@@ -135,10 +155,15 @@ test('refuses to overflow a list instead of dropping names', () => {
   assert.equal(applyRsvp(event, 'late', 'maybe'), 'added');
 });
 
-test('someone already on the full list can still withdraw from it', () => {
+test('someone already on a full list is not told it is full', () => {
   const going = Array.from({ length: MAX_PER_LIST }, (_, i) => `u${i}`);
   const event = sample({ rsvp: { going, maybe: [], no: [] } });
 
-  assert.equal(applyRsvp(event, 'u0', 'going'), 'withdrawn');
+  // Their own slot must not count against them, so 'unchanged' has to win the race.
+  assert.equal(applyRsvp(event, 'u0', 'going'), 'unchanged');
+  assert.equal(event.rsvp.going.length, MAX_PER_LIST);
+
+  // And leaving a full list for another one still works.
+  assert.equal(applyRsvp(event, 'u0', 'no'), 'moved');
   assert.equal(event.rsvp.going.length, MAX_PER_LIST - 1);
 });
