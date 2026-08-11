@@ -1,5 +1,10 @@
 services:
   bot:
+    # `docker compose pull` needs a name to pull, and ${TAG} is what lets a deploy pin one
+    # commit — `TAG=<sha> docker compose up -d` rolls back without editing this file.
+    image: ghcr.io/wangryan408/grasstoucher:${TAG:-latest}
+    # Kept alongside `image:` so `docker compose up --build` still builds from source locally.
+    # After a `pull` the image exists, so `up -d` uses it rather than rebuilding.
     build: .
     env_file: .env
     restart: unless-stopped

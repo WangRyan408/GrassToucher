@@ -1,0 +1,75 @@
+# Pull the new image on the host and restart the bot.
+#
+# Runs itself after a successful Publish, and can be run by hand from the Actions tab with any
+# tag that's already in GHCR — which is the rollback: dispatch with an older commit sha.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to deploy (a commit sha, or latest)
+        default: latest
+
+# One deploy at a time. Two merges in quick succession queue instead of both reaching for
+# docker compose on the same host at once.
+concurrency:
+  group: deploy
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # workflow_run fires on failure and cancellation too, so the conclusion has to be checked
+    # here — there is no `types: [success]`.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: production # Add required reviewers here if you ever want deploys gated.
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      # The automatic path deploys the exact commit that was just built, not `latest`, so
+      # `docker compose ps` on the host names the running commit.
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_sha }}
+    steps:
+      # No actions/checkout: this workflow only opens an SSH connection.
+      - name: Load the deploy key
+        # Secrets arrive through `env`, never interpolated into the script body — a `${{ }}`
+        # inside a run: block is pasted in as text before bash sees it, which is a shell
+        # injection seam for anything an attacker can influence.
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # A pinned fingerprint, not `ssh-keyscan` at deploy time: keyscan trusts whatever
+          # answers on port 22, which is the one thing a private key must not do.
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" \
+            TAG="$TAG" DEPLOY_PATH="$DEPLOY_PATH" bash -euo pipefail -s <<'REMOTE'
+          cd "$DEPLOY_PATH"
+          docker compose pull
+          docker compose up -d --remove-orphans
+          # The bot reads its config and logs in at boot, so a bad token or a missing channel
+          # id crashes it seconds after a "successful" deploy. Catch that here instead of
+          # finding out when nobody can create an event.
+          sleep 8
+          if [ -z "$(docker compose ps --status running --quiet)" ]; then
+            echo "::error::Container is not running after deploy"
+            docker compose logs --tail=50
+            exit 1
+          fi
+          docker compose ps
+          docker image prune -f
+          REMOTE

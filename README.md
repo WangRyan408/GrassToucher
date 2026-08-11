@@ -138,7 +138,7 @@ why cancelling is a command rather than something you do from the post's context
 
 ```sh
 bun install
-bun test           # vitest
+bun run test       # vitest — `bun test` is bun's own runner and ignores this script
 bun run typecheck  # tsc — the real gate; it only checks, it never emits
 bun run dev        # reads .env via --env-file
 ```
@@ -173,6 +173,48 @@ address formatting. Everything else is Discord I/O. The suite makes no network c
 The bot reads only its own messages, which is why it needs no privileged intents. If event
 fields ever read back blank, enable **Message Content Intent** in the developer portal —
 that's the one assumption in the design worth knowing about.
+
+## Deployment
+
+Three workflows in `.github/workflows/`, each one doing a single thing:
+
+| Workflow | Runs on | Does |
+|---|---|---|
+| `ci.yml` | pull requests, and whenever Publish calls it | `bun run typecheck`, `bun run test`, and builds the image without pushing |
+| `publish.yml` | push to `main` | Calls CI, then pushes `ghcr.io/wangryan408/grasstoucher:latest` and `:<sha>` |
+| `deploy.yml` | a successful Publish, or the Run workflow button | SSHes to the host, pulls the new tag, restarts, and fails if the container isn't up |
+
+Merging to main is the deploy. Tests failing means nothing reaches GHCR, and nothing reaching
+GHCR means no deploy — `needs:` does that, which is why the tests live in a workflow Publish
+can call rather than a separate run nobody is waiting on.
+
+Every image is tagged with its commit sha as well as `latest`, so a rollback is
+**Actions → Deploy → Run workflow** with an older sha in the tag box. The automatic path
+deploys the sha rather than `latest`, so `docker compose ps` on the host names the commit
+that's actually running.
+
+**Repo secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `SSH_HOST` | Hostname or IP of the box running the bot |
+| `SSH_USER` | User to connect as — needs to be in the `docker` group |
+| `SSH_KEY` | Private half of a key whose public half is in that user's `authorized_keys` |
+| `SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -H your.host`, so the deploy pins the host's fingerprint instead of trusting whatever answers |
+| `DEPLOY_PATH` | Directory on the host holding this repo's `docker-compose.yaml` and its `.env` |
+
+**On the host**, once: clone the repo, write `.env` (see Setup), and
+
+```sh
+docker login ghcr.io -u YOUR_GITHUB_USER   # paste a PAT with read:packages
+```
+
+The GHCR package is private until you say otherwise, so without that login
+`docker compose pull` answers 401 and the first deploy fails. Making the package public in its
+settings works too, and then the host needs no credentials at all.
+
+`docker-compose.yaml` on the host is the one thing CI never updates — a change to it needs a
+`git pull` there.
 
 ## Roadmap
 
