@@ -1,16 +1,19 @@
 import { EmbedBuilder, TimestampStyles, time } from 'discord.js';
-import { CHOICES, COLOR_UPCOMING, MARKER, listEvents } from './event.js';
+import type { GuildTextBasedChannel, Message } from 'discord.js';
+import { CHOICES, COLOR_UPCOMING, MARKER, listEvents } from './event.ts';
+import type { Ctx, EventEntry } from './types.ts';
+import { tryCatch } from './utils/tryCatch.ts';
 
 /** ponytail: one embed holds 4096 description chars. Past ~25 events, paginate or split. */
 const MAX_LINES = 25;
 
 const DIGEST_FOOTER = `${MARKER} · digest`;
 
-function isDigest(message, clientUserId) {
+function isDigest(message: Message | null | undefined, clientUserId: string): boolean {
   return message?.author?.id === clientUserId && message.embeds?.[0]?.footer?.text === DIGEST_FOOTER;
 }
 
-export function renderDigest(entries) {
+export function renderDigest(entries: EventEntry[]): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setTitle('📅 Upcoming Events')
     .setColor(COLOR_UPCOMING)
@@ -42,11 +45,11 @@ export function renderDigest(entries) {
   return embed.setDescription(lines.join('\n\n').slice(0, 4096));
 }
 
-async function pinQuietly(message) {
+async function pinQuietly(message: Message): Promise<void> {
   if (message.pinned) return;
-  try {
-    await message.pin();
-  } catch (error) {
+
+  const { error } = await tryCatch(message.pin());
+  if (error) {
     console.error(
       `Could not pin the digest (${error.message}). Grant the bot Pin Messages in ` +
         'that channel — Manage Messages is not enough, Discord split pinning into its own ' +
@@ -62,17 +65,23 @@ async function pinQuietly(message) {
  * same message back up. The recent-message fallback matters because that key can go away:
  * a moderator unpins it, or the bot lacks Pin Messages. Without the fallback, a digest
  * we can't find is a digest we post again on every single sweep.
+ *
+ * `clientUserId` is passed in rather than read off `channel.client`, which is only typed as
+ * possibly-logged-in. Same reason `listEvents` takes it.
  */
-export async function upsertDigest(channel, entries) {
+export async function upsertDigest(
+  channel: GuildTextBasedChannel,
+  entries: EventEntry[],
+  clientUserId: string,
+): Promise<Message> {
   const embed = renderDigest(entries);
-  const me = channel.client.user.id;
 
   const { items } = await channel.messages.fetchPins();
-  let existing = items.map((pin) => pin.message).find((m) => isDigest(m, me));
+  let existing = items.map((pin) => pin.message).find((m) => isDigest(m, clientUserId));
 
   if (!existing) {
     const recent = await channel.messages.fetch({ limit: 50 });
-    existing = recent.find((m) => isDigest(m, me));
+    existing = recent.find((m) => isDigest(m, clientUserId));
   }
 
   if (existing) {
@@ -91,11 +100,11 @@ export async function upsertDigest(channel, entries) {
  * drift from the forum. Returns every event found, including finished ones, so callers
  * don't need a second round of fetches.
  */
-export async function rebuildDigest(ctx) {
+export async function rebuildDigest(ctx: Ctx): Promise<EventEntry[]> {
   const entries = await listEvents(ctx.forum, ctx.client.user.id);
   const cutoff = Date.now() - ctx.config.archiveGraceHours * 3_600_000;
   const active = entries.filter(({ event }) => event.startsAt.getTime() > cutoff);
 
-  await upsertDigest(ctx.digestChannel, active);
+  await upsertDigest(ctx.digestChannel, active, ctx.client.user.id);
   return entries;
 }

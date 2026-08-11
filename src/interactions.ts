@@ -10,7 +10,15 @@ import {
   escapeMarkdown,
   time,
 } from 'discord.js';
-import { rebuildDigest } from './digest.js';
+import type {
+  AutocompleteInteraction,
+  ButtonInteraction,
+  ChatInputCommandInteraction,
+  Interaction,
+  ThreadChannel,
+  User,
+} from 'discord.js';
+import { rebuildDigest } from './digest.ts';
 import {
   CHOICES,
   applyRsvp,
@@ -22,9 +30,11 @@ import {
   readEvent,
   rsvpRow,
   toEmbed,
-} from './event.js';
-import { searchPlaces } from './places.js';
-import { TIME_FORMAT, isValidTimeZone, zonedToDate } from './time.js';
+} from './event.ts';
+import { searchPlaces } from './places.ts';
+import { TIME_FORMAT, isValidTimeZone, zonedToDate } from './time.ts';
+import type { Ctx, Event, EventEntry, RsvpChoice } from './types.ts';
+import { tryCatch } from './utils/tryCatch.ts';
 
 export const commands = [
   new SlashCommandBuilder()
@@ -86,43 +96,54 @@ export const commands = [
 
 const CANCEL_ID = 'cancel';
 
-const ephemeral = (text) => ({ content: text, flags: MessageFlags.Ephemeral });
+// `as const` pins the flag to the one enum member: without it the type widens to the whole
+// MessageFlags enum, and reply() only accepts the handful of flags it can actually set.
+const ephemeral = (text: string) => ({ content: text, flags: MessageFlags.Ephemeral as const });
 // editReply can't change ephemerality — deferReply already set it.
-const content = (text) => ({ content: text });
+const content = (text: string) => ({ content: text });
 
-/** Resolve the `when` + `timezone` options into a Date, or return an error string. */
-function parseWhen(interaction, ctx) {
+/**
+ * Resolve the `when` + `timezone` options into a Date, or return the complaint to show.
+ *
+ * A bare string for the failure, not `{ error }`: `if (typeof x === 'string')` narrows, while
+ * `if (x.error)` can't rule out the failure arm — an empty error string is falsy too.
+ */
+function parseWhen(
+  interaction: ChatInputCommandInteraction,
+  ctx: Ctx,
+): { startsAt: Date; tz: string } | string {
   const raw = interaction.options.getString('when');
   const tz = interaction.options.getString('timezone') ?? ctx.config.defaultTz;
 
   if (!isValidTimeZone(tz)) {
-    return { error: `\`${tz}\` isn't a timezone I recognise. Try something like \`Europe/Berlin\`.` };
+    return `\`${tz}\` isn't a timezone I recognise. Try something like \`Europe/Berlin\`.`;
   }
   const startsAt = zonedToDate(raw, tz);
   if (!startsAt) {
-    return {
-      error: `Couldn't read \`${raw}\` as a time. Use \`${TIME_FORMAT}\` on a 24-hour clock, e.g. \`2026-08-15 19:30\`. (A time skipped by a daylight-saving jump won't work either.)`,
-    };
+    return `Couldn't read \`${raw}\` as a time. Use \`${TIME_FORMAT}\` on a 24-hour clock, e.g. \`2026-08-15 19:30\`. (A time skipped by a daylight-saving jump won't work either.)`;
   }
   return { startsAt, tz };
 }
 
-async function handleCreate(interaction, ctx) {
+async function handleCreate(interaction: ChatInputCommandInteraction, ctx: Ctx) {
   const parsed = parseWhen(interaction, ctx);
-  if (parsed.error) return interaction.reply(ephemeral(parsed.error));
+  if (typeof parsed === 'string') return interaction.reply(ephemeral(parsed));
   if (parsed.startsAt.getTime() < Date.now()) {
     return interaction.reply(ephemeral("That time has already passed — pick a future one."));
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const event = {
-    title: interaction.options.getString('title'),
+  // `title` and `when` are required options, so Discord guarantees they're present — the
+  // second argument to getString says so, and hands back a string instead of string | null.
+  const event: Event = {
+    title: interaction.options.getString('title', true),
     description: interaction.options.getString('description'),
     where: interaction.options.getString('where'),
     startsAt: parsed.startsAt,
     organizerId: interaction.user.id,
     reminded: false,
+    cancelled: false,
     rsvp: { going: [interaction.user.id], maybe: [], no: [] },
   };
 
@@ -137,17 +158,25 @@ async function handleCreate(interaction, ctx) {
 }
 
 /** The only place in a forum post where strikethrough actually renders. */
-const cancelledBanner = (event) => `~~${escapeMarkdown(event.title)}~~ **CANCELLED**`;
+const cancelledBanner = (event: Event) => `~~${escapeMarkdown(event.title)}~~ **CANCELLED**`;
 
 /**
  * DM everyone who might have turned up, either way the plan changed. Best effort on
  * purpose: a member with server DMs switched off answers 50007, and one closed inbox must
- * not stop the rest.
+ * not stop the rest — which is what `tryCatch` buys here: none of these ever reject, so the
+ * `Promise.all` can't short-circuit on the first closed inbox.
  *
  * ponytail: one REST call per recipient. MAX_PER_LIST caps this near 80; batch only if it
  * ever costs real rate-limit headroom.
  */
-async function notifyAttendees(ctx, event, actor, thread, recipients, { restored = false } = {}) {
+async function notifyAttendees(
+  ctx: Ctx,
+  event: Event,
+  actor: User,
+  thread: ThreadChannel,
+  recipients: string[],
+  { restored = false }: { restored?: boolean } = {},
+) {
   const when = `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`;
   const title = escapeMarkdown(event.title);
   const guild = escapeMarkdown(ctx.guild.name);
@@ -164,13 +193,15 @@ async function notifyAttendees(ctx, event, actor, thread, recipients, { restored
         `Cancelled by ${actor.toString()} · ${thread.url}`,
       ].join('\n');
 
-  const results = await Promise.allSettled(recipients.map((id) => ctx.client.users.send(id, body)));
-  const sent = results.filter((r) => r.status === 'fulfilled').length;
+  const results = await Promise.all(
+    recipients.map((id) => tryCatch(ctx.client.users.send(id, body))),
+  );
+  const sent = results.filter((result) => !result.error).length;
   return { sent, failed: results.length - sent };
 }
 
 /** How the reply reports a DM fan-out. Cancelling and reinstating word it identically. */
-function deliveryNotes(lead, { sent, failed }) {
+function deliveryNotes(lead: string, { sent, failed }: { sent: number; failed: number }) {
   const notes = [lead];
   if (sent) notes.push(`Notified ${sent}.`);
   if (failed) notes.push(`${failed} couldn't be DMed — their DMs are closed.`);
@@ -180,26 +211,34 @@ function deliveryNotes(lead, { sent, failed }) {
 /**
  * The guard both in-thread commands share: is this one of our events, and may this person
  * act on it? Kept in one place so edit and cancel can't drift on who's allowed to do what.
+ *
+ * Returns the entry, or the complaint to show — same reason as `parseWhen`. The thread comes
+ * off the interaction rather than being passed in: every caller passed `interaction.channel`.
  */
-async function resolveEvent(thread, interaction, ctx, verb) {
+async function resolveEvent(
+  interaction: ChatInputCommandInteraction | ButtonInteraction,
+  ctx: Ctx,
+  verb: string,
+): Promise<EventEntry | string> {
+  const thread = interaction.channel;
   if (!thread?.isThread() || thread.parentId !== ctx.forum.id) {
-    return { error: "Run this inside the event's thread." };
+    return "Run this inside the event's thread.";
   }
 
   const entry = await readEvent(thread, ctx.client.user.id);
-  if (!entry) return { error: "This thread isn't a GrassToucher event." };
+  if (!entry) return "This thread isn't a GrassToucher event.";
 
   const isOrganizer = entry.event.organizerId === interaction.user.id;
   const isMod = interaction.memberPermissions?.has(PermissionFlagsBits.ManageThreads);
   if (!isOrganizer && !isMod) {
-    return { error: `Only the organizer (or a mod) can ${verb} this event.` };
+    return `Only the organizer (or a mod) can ${verb} this event.`;
   }
   return entry;
 }
 
-async function handleEdit(interaction, ctx) {
-  const found = await resolveEvent(interaction.channel, interaction, ctx, 'edit');
-  if (found.error) return interaction.reply(ephemeral(found.error));
+async function handleEdit(interaction: ChatInputCommandInteraction, ctx: Ctx) {
+  const found = await resolveEvent(interaction, ctx, 'edit');
+  if (typeof found === 'string') return interaction.reply(ephemeral(found));
   const { thread, message, event } = found;
 
   const title = interaction.options.getString('title');
@@ -217,7 +256,7 @@ async function handleEdit(interaction, ctx) {
 
   if (when) {
     const parsed = parseWhen(interaction, ctx);
-    if (parsed.error) return interaction.reply(ephemeral(parsed.error));
+    if (typeof parsed === 'string') return interaction.reply(ephemeral(parsed));
     event.startsAt = parsed.startsAt;
   }
   if (title) event.title = title;
@@ -257,9 +296,9 @@ async function handleEdit(interaction, ctx) {
   );
 }
 
-async function handleCancel(interaction, ctx) {
-  const found = await resolveEvent(interaction.channel, interaction, ctx, 'cancel');
-  if (found.error) return interaction.reply(ephemeral(found.error));
+async function handleCancel(interaction: ChatInputCommandInteraction, ctx: Ctx) {
+  const found = await resolveEvent(interaction, ctx, 'cancel');
+  if (typeof found === 'string') return interaction.reply(ephemeral(found));
   const { event } = found;
 
   if (event.cancelled) return interaction.reply(ephemeral('That event is already cancelled.'));
@@ -272,7 +311,7 @@ async function handleCancel(interaction, ctx) {
   return interaction.reply({
     content: `Cancel **${escapeMarkdown(event.title)}**? The post stays, marked CANCELLED. ${notice}`,
     components: [
-      new ActionRowBuilder().addComponents(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(CANCEL_ID)
           .setLabel('Cancel event')
@@ -284,13 +323,13 @@ async function handleCancel(interaction, ctx) {
   });
 }
 
-async function handleCancelConfirm(interaction, ctx) {
+async function handleCancelConfirm(interaction: ButtonInteraction, ctx: Ctx) {
   await interaction.deferUpdate();
 
   // The confirm can sit unclicked for minutes, so re-read and re-authorize rather than
   // trusting anything /event cancel established.
-  const found = await resolveEvent(interaction.channel, interaction, ctx, 'cancel');
-  if (found.error) return interaction.editReply({ content: found.error, components: [] });
+  const found = await resolveEvent(interaction, ctx, 'cancel');
+  if (typeof found === 'string') return interaction.editReply({ content: found, components: [] });
 
   const { thread, message, event } = found;
   if (event.cancelled) {
@@ -298,7 +337,7 @@ async function handleCancelConfirm(interaction, ctx) {
   }
 
   const recipients = notifyRecipients(event, interaction.user.id);
-  const cancelled = { ...event, cancelled: true };
+  const cancelled: Event = { ...event, cancelled: true };
 
   await ensureOpen(thread); // Archived threads reject edits and renames.
   await message.edit({
@@ -319,14 +358,17 @@ async function handleCancelConfirm(interaction, ctx) {
   });
 }
 
+/** `hasOwn`, not `in`: the prototype chain would answer yes to a custom id of `rsvp:toString`. */
+const isChoice = (value: string): value is RsvpChoice => Object.hasOwn(CHOICES, value);
+
 /**
  * ponytail: two people clicking at the same instant can have one write win, losing the
  * other RSVP. Discord offers no compare-and-swap on message edits and a re-click fixes
  * it, so this stays unguarded.
  */
-async function handleRsvp(interaction, ctx) {
+async function handleRsvp(interaction: ButtonInteraction, ctx: Ctx) {
   const choice = interaction.customId.split(':')[1];
-  if (!(choice in CHOICES)) return;
+  if (!isChoice(choice)) return;
   if (!isOurs(interaction.message, ctx.client.user.id)) return;
 
   const event = fromEmbed(interaction.message.embeds[0]);
@@ -360,10 +402,13 @@ async function handleRsvp(interaction, ctx) {
  * Suggest addresses while someone types `where:`.
  *
  * Owns its error handling, unlike every other handler here: an autocomplete interaction is
- * not repliable, so index.js's catch-all can't answer one, and an unanswered interaction
+ * not repliable, so index.ts's catch-all can't answer one, and an unanswered interaction
  * leaves "loading options failed" sitting in the client. Every failure is an empty list.
+ *
+ * Still a try/catch rather than a `tryCatch`: `getFocused(true)` throws *synchronously*, and
+ * tryCatch only wraps a promise.
  */
-async function handleAutocomplete(interaction, ctx) {
+async function handleAutocomplete(interaction: AutocompleteInteraction, ctx: Ctx) {
   try {
     const focused = interaction.options.getFocused(true); // Throws with nothing focused.
     if (focused.name !== 'where') return interaction.respond([]);
@@ -371,11 +416,11 @@ async function handleAutocomplete(interaction, ctx) {
   } catch (error) {
     console.error('Autocomplete failed:', error);
     // May itself throw if the respond above already landed; nothing left to do either way.
-    await interaction.respond([]).catch(() => {});
+    await tryCatch(interaction.respond([]));
   }
 }
 
-export async function route(interaction, ctx) {
+export async function route(interaction: Interaction, ctx: Ctx) {
   // First: this fires on every keystroke, so it's the busiest branch by a wide margin.
   if (interaction.isAutocomplete()) return handleAutocomplete(interaction, ctx);
 

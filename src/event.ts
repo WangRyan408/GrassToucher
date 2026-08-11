@@ -6,6 +6,9 @@ import {
   TimestampStyles,
   time,
 } from 'discord.js';
+import type { APIEmbed, Embed, ForumChannel, Message, ThreadChannel } from 'discord.js';
+import type { Event, EventEntry, RsvpChoice } from './types.ts';
+import { tryCatch } from './utils/tryCatch.ts';
 
 /** Footer prefix marking a message as one of ours. */
 export const MARKER = 'GrassToucher';
@@ -24,17 +27,27 @@ export const CANCELLED_SUFFIX = ' — CANCELLED';
  */
 export const MAX_PER_LIST = 40;
 
-export const CHOICES = {
+interface ChoiceMeta {
+  emoji: string;
+  label: string;
+  style: ButtonStyle;
+}
+
+/** Typed as a full Record, so a new RsvpChoice can't be added without a button for it. */
+export const CHOICES: Record<RsvpChoice, ChoiceMeta> = {
   going: { emoji: '✅', label: 'Going', style: ButtonStyle.Success },
   maybe: { emoji: '🤔', label: 'Maybe', style: ButtonStyle.Secondary },
   no: { emoji: '❌', label: "Can't", style: ButtonStyle.Secondary },
 };
 
+/** `Object.entries` widens the key to `string`; the three loops below need it kept. */
+const choiceEntries = Object.entries(CHOICES) as [RsvpChoice, ChoiceMeta][];
+
 export const RSVP_PREFIX = 'rsvp';
 
-export function rsvpRow() {
-  return new ActionRowBuilder().addComponents(
-    ...Object.entries(CHOICES).map(([key, c]) =>
+export function rsvpRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    ...choiceEntries.map(([key, c]) =>
       new ButtonBuilder()
         .setCustomId(`${RSVP_PREFIX}:${key}`)
         .setLabel(c.label)
@@ -44,20 +57,20 @@ export function rsvpRow() {
   );
 }
 
-const mentions = (ids) => (ids.length ? ids.map((id) => `<@${id}>`).join(' ') : '—');
-const readIds = (value) => [...value.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]);
+const mentions = (ids: string[]) => (ids.length ? ids.map((id) => `<@${id}>`).join(' ') : '—');
+const readIds = (value: string) => [...value.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]);
 
 /**
  * The one place the embed colour is decided, so the sweep can ask "does this need a
  * re-render?" without duplicating the rule and looping forever when it guesses wrong.
  */
-export function embedColor(event) {
+export function embedColor(event: Event): number {
   if (event.cancelled) return COLOR_CANCELLED; // Outranks past-grey.
   return new Date(event.startsAt).getTime() < Date.now() ? COLOR_PAST : COLOR_UPCOMING;
 }
 
 /** Title as shown in the embed and thread name. Truncates the title, never the marker. */
-export function displayTitle(event, cap) {
+export function displayTitle(event: Event, cap: number): string {
   if (!event.cancelled) return event.title.slice(0, cap);
   return event.title.slice(0, cap - CANCELLED_SUFFIX.length) + CANCELLED_SUFFIX;
 }
@@ -66,15 +79,15 @@ export function displayTitle(event, cap) {
  * Who hears about a change of plan: everyone who might turn up, minus whoever made it.
  * The same audience both ways — anyone told an event was off has to be told it's back on.
  */
-export function notifyRecipients(event, actorId) {
-  const ids = new Set([...event.rsvp.going, ...event.rsvp.maybe, event.organizerId]);
+export function notifyRecipients(event: Event, actorId: string): string[] {
+  const ids = new Set([...event.rsvp.going, ...event.rsvp.maybe]);
+  if (event.organizerId) ids.add(event.organizerId); // Absent when the footer was unreadable.
   ids.delete(actorId);
-  ids.delete(null);
   return [...ids];
 }
 
 /** Build the starter-message embed that stores the event. */
-export function toEmbed(event) {
+export function toEmbed(event: Event): EmbedBuilder {
   const startsAt = new Date(event.startsAt);
 
   const embed = new EmbedBuilder()
@@ -90,7 +103,7 @@ export function toEmbed(event) {
   if (event.where) embed.addFields({ name: 'Where', value: event.where.slice(0, 1024) });
 
   embed.addFields(
-    ...Object.entries(CHOICES).map(([key, c]) => ({
+    ...choiceEntries.map(([key, c]) => ({
       name: `${c.emoji} ${c.label} (${event.rsvp[key].length})`,
       value: mentions(event.rsvp[key]),
       inline: true,
@@ -105,12 +118,13 @@ export function toEmbed(event) {
 
 /**
  * Read an event back out of its embed. Accepts either a discord.js `Embed` or the plain
- * JSON from `EmbedBuilder#toJSON()` — the property names line up.
+ * JSON from `EmbedBuilder#toJSON()` — the property names line up, which is why `fields` is
+ * annotated structurally rather than with either library type.
  */
-export function fromEmbed(embed) {
-  const fields = embed.fields ?? [];
+export function fromEmbed(embed: Embed | APIEmbed): Event {
+  const fields: readonly { name: string; value: string }[] = embed.fields ?? [];
   const footer = embed.footer?.text ?? '';
-  const byEmoji = (emoji) => fields.find((f) => f.name.startsWith(emoji))?.value ?? '';
+  const byEmoji = (emoji: string) => fields.find((f) => f.name.startsWith(emoji))?.value ?? '';
 
   // Undo displayTitle. Skip this and every re-render appends another marker.
   const cancelled = footer.includes('cancelled');
@@ -122,18 +136,24 @@ export function fromEmbed(embed) {
   return {
     title,
     description: embed.description ?? null,
-    startsAt: new Date(embed.timestamp),
+    // `?? 0` is what `new Date(null)` already did: epoch, not Invalid Date.
+    startsAt: new Date(embed.timestamp ?? 0),
     where: fields.find((f) => f.name === 'Where')?.value ?? null,
     organizerId: /org:(\d+)/.exec(footer)?.[1] ?? null,
     reminded: footer.includes('reminded'),
     cancelled,
-    rsvp: Object.fromEntries(
-      Object.entries(CHOICES).map(([key, c]) => [key, readIds(byEmoji(c.emoji))]),
-    ),
+    // Spelled out rather than looped: `rsvp` must be a complete Rsvp, so adding a fourth
+    // choice fails here at compile time instead of producing a half-filled record.
+    rsvp: {
+      going: readIds(byEmoji(CHOICES.going.emoji)),
+      maybe: readIds(byEmoji(CHOICES.maybe.emoji)),
+      no: readIds(byEmoji(CHOICES.no.emoji)),
+    },
   };
 }
 
-export function isOurs(message, clientUserId) {
+/** A predicate, so callers that pass a possibly-null message get it narrowed for free. */
+export function isOurs(message: Message | null | undefined, clientUserId: string): message is Message {
   return (
     message?.author?.id === clientUserId && !!message.embeds?.[0]?.footer?.text?.startsWith(MARKER)
   );
@@ -144,16 +164,21 @@ export function isOurs(message, clientUserId) {
  * that quietly drops your RSVP on a second click loses answers to stray double-clicks, and
  * "Can't" is already the way to say you're not coming.
  *
- * Mutates `event.rsvp`. Returns 'added' | 'moved' | 'unchanged' | 'full'.
+ * Mutates `event.rsvp`.
  */
-export function applyRsvp(event, userId, choice) {
-  const current = Object.keys(event.rsvp).find((key) => event.rsvp[key].includes(userId));
+export function applyRsvp(
+  event: Event,
+  userId: string,
+  choice: RsvpChoice,
+): 'added' | 'moved' | 'unchanged' | 'full' {
+  const keys = Object.keys(event.rsvp) as RsvpChoice[];
+  const current = keys.find((key) => event.rsvp[key].includes(userId));
   if (current === choice) return 'unchanged';
   // Only reachable when the answer is really changing, so their own slot can't count
   // against them on a list that's already full.
   if (event.rsvp[choice].length >= MAX_PER_LIST) return 'full';
 
-  for (const key of Object.keys(event.rsvp)) {
+  for (const key of keys) {
     event.rsvp[key] = event.rsvp[key].filter((id) => id !== userId);
   }
   event.rsvp[choice].push(userId);
@@ -164,7 +189,7 @@ export function applyRsvp(event, userId, choice) {
  * Discord rejects sends, edits and interaction updates in an archived thread. Since we
  * deliberately keep archived posts in the digest, people do click RSVP on them.
  */
-export async function ensureOpen(thread) {
+export async function ensureOpen(thread: ThreadChannel): Promise<void> {
   if (thread.archived) await thread.setArchived(false, 'GrassToucher update');
 }
 
@@ -177,13 +202,12 @@ export async function ensureOpen(thread) {
  * ponytail: that's one REST call per event per rebuild. Fine at forum scale; cache with
  * manual invalidation if rate-limit headroom ever gets tight.
  */
-export async function readEvent(thread, clientUserId) {
-  let message;
-  try {
-    message = await thread.fetchStarterMessage({ force: true });
-  } catch {
-    return null; // Starter message deleted.
-  }
+export async function readEvent(
+  thread: ThreadChannel,
+  clientUserId: string,
+): Promise<EventEntry | null> {
+  const { data: message, error } = await tryCatch(thread.fetchStarterMessage({ force: true }));
+  if (error) return null; // Starter message deleted.
   if (!isOurs(message, clientUserId)) return null;
   return { thread, message, event: fromEmbed(message.embeds[0]) };
 }
@@ -197,7 +221,10 @@ export async function readEvent(thread, clientUserId) {
  * ponytail: only the 100 most recently archived posts are checked. Paginate with
  * `before` if a forum ever accumulates enough old posts to hide a future event.
  */
-export async function listEvents(forum, clientUserId) {
+export async function listEvents(
+  forum: ForumChannel,
+  clientUserId: string,
+): Promise<EventEntry[]> {
   const [active, archived] = await Promise.all([
     forum.threads.fetchActive(),
     forum.threads.fetchArchived({ limit: 100 }),
@@ -206,5 +233,7 @@ export async function listEvents(forum, clientUserId) {
   const threads = [...active.threads.values(), ...archived.threads.values()];
   const entries = await Promise.all(threads.map((thread) => readEvent(thread, clientUserId)));
 
-  return entries.filter(Boolean).sort((a, b) => a.event.startsAt - b.event.startsAt);
+  return entries
+    .filter((entry) => entry !== null)
+    .sort((a, b) => a.event.startsAt.getTime() - b.event.startsAt.getTime());
 }

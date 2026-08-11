@@ -121,22 +121,29 @@ why cancelling is a command rather than something you do from the post's context
 
 ```sh
 npm install
-npm test          # node --test, no framework
-npm run dev       # reads .env via node --env-file
+npm test           # vitest
+npm run typecheck  # tsc — the real gate; it only checks, it never emits
+npm run dev        # reads .env via node --env-file
 ```
 
-`src/` is the bot, `test/` mirrors it — `test/event.test.js` covers `src/event.js`, and so on.
+Node 24 or newer, because it runs the TypeScript sources directly by stripping the types out.
+There is no build step and no `dist/` — which is also why every relative import names a `.ts`
+file: Node resolves specifiers literally and won't rewrite `./event.js` for you.
+
+`src/` is the bot, `test/` mirrors it — `test/event.test.ts` covers `src/event.ts`, and so on.
 Only three files have logic worth testing: timezone conversion, the embed⇄event codec, and
 address formatting. Everything else is Discord I/O. The suite makes no network calls.
 
 | File | Job |
 |---|---|
-| `src/index.js` | Config validation, boot, interaction routing, the 10-minute sweep |
-| `src/event.js` | The model: embed codec, forum listing, RSVP rules |
-| `src/digest.js` | Renders the digest and edits the pin in place |
-| `src/interactions.js` | Slash command definitions, handlers, cancel/reinstate DMs |
-| `src/places.js` | Address lookup for `where:` — Photon adapter and label formatting |
-| `src/time.js` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
+| `src/index.ts` | Config validation, boot, interaction routing, the 10-minute sweep |
+| `src/event.ts` | The model: embed codec, forum listing, RSVP rules |
+| `src/digest.ts` | Renders the digest and edits the pin in place |
+| `src/interactions.ts` | Slash command definitions, handlers, cancel/reinstate DMs |
+| `src/places.ts` | Address lookup for `where:` — Photon adapter and label formatting |
+| `src/time.ts` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
+| `src/types.ts` | The shapes that cross module boundaries: `Event`, `Config`, `Ctx` |
+| `src/utils/tryCatch.ts` | `await tryCatch(promise)` → `{ data, error }`, for calls allowed to fail |
 
 ### If embeds come back empty
 
@@ -146,12 +153,12 @@ that's the one assumption in the design worth knowing about.
 
 ## Roadmap
 
-Not commitments — the next three things worth doing, in the order they'd pay off.
+Not commitments — what's worth doing next, and what's already landed.
 
 **✅ done · 🚧 in progress · ❌ not started**
 
 | Status | Change | Why, and what it costs |
 |:---:|---|---|
-| ❌ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and nothing enforces it today but one round-trip test. discord.js ships its own types, so the work is mostly a `tsc` step plus annotating `src/`. The cost is what's lost — this is currently plain ESM that runs straight off the filesystem, which is why `npm run dev` and the Dockerfile are three lines each. |
 | ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing already exists for `where:`, and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. `timezone:` deserves it for a different reason: IANA names are impossible to guess. |
-| ❌ | **A `tryCatch` wrapper** | Fallible calls are guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a hand-rolled try/catch in the autocomplete handler because the global one structurally can't reach it. One helper returning `[result, error]` would make those uniform, and more usefully make it visible which calls are *deliberately* left unguarded. |
+| ✅ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and only one round-trip test enforced it. Nothing was lost to a build step in the end — Node strips types natively, so it still runs straight off the filesystem and the Dockerfile is still three lines; `typescript` is a devDependency that only ever type-checks. The cost is a Node 24 floor and `.ts` in every relative import. |
+| ✅ | **A `tryCatch` wrapper** | Fallible calls were guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a bare try/catch around the digest pin and the starter-message fetch. `src/utils/tryCatch.ts` returns `{ data, error }` and now covers all five, which also makes the exception visible: `handleAutocomplete` keeps its own try/catch because `getFocused(true)` throws *synchronously* and the helper only takes a promise. |

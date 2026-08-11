@@ -8,6 +8,8 @@
  * Nominatim is not an option here — its usage policy lists auto-complete under
  * "Unacceptable Use".
  */
+import { tryCatch } from './utils/tryCatch.ts';
+
 const ENDPOINT = 'https://photon.komoot.io/api/';
 
 /** Discord fires an autocomplete interaction on every keystroke, including the first. */
@@ -22,11 +24,30 @@ const CHOICE_CAP = 100;
 const UA = 'GrassToucher (Discord event bot; https://github.com/WangRyan408/GrassToucher)';
 
 /**
+ * The five keys we read off a Photon feature. It sends a dozen more (country, postcode,
+ * osm_*, extent), hence the index signature — they're ignored, not rejected.
+ */
+export interface PhotonProperties {
+  name?: string;
+  housenumber?: string;
+  street?: string;
+  city?: string;
+  state?: string;
+  [key: string]: unknown;
+}
+
+/** Shaped for `interaction.respond()`, which wants name/value pairs. */
+export interface Choice {
+  name: string;
+  value: string;
+}
+
+/**
  * Photon GeoJSON properties → one human-readable line.
  *
  * Pure, and the only part of this file worth testing: everything else is a fetch.
  */
-export function formatPlace(properties = {}) {
+export function formatPlace(properties: PhotonProperties = {}): string {
   const { name, housenumber, street, city, state } = properties;
 
   const parts = [
@@ -47,8 +68,23 @@ export function formatPlace(properties = {}) {
  * `Cache-Control: max-age=3600` says caching is welcome, so this is politeness to them more
  * than speed for us. Swap in an LRU only if the hit rate ever matters.
  */
-const cache = new Map();
+const cache = new Map<string, Choice[]>();
 const CACHE_MAX = 500;
+
+/** The fallible half, split out so `tryCatch` can wrap it: throws, and the caller decides. */
+async function fetchChoices(url: URL): Promise<Choice[]> {
+  const response = await fetch(url, {
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`Photon answered ${response.status}`);
+
+  const { features } = (await response.json()) as { features?: { properties?: PhotonProperties }[] };
+  return (features ?? [])
+    .map((feature) => formatPlace(feature.properties))
+    .filter(Boolean)
+    .map((label) => ({ name: label, value: label }));
+}
 
 /**
  * Suggestions for `query`, ready to hand to `interaction.respond()`.
@@ -61,12 +97,16 @@ const CACHE_MAX = 500;
  * returns Argentina and Spain rather than the park two miles away — so it is close to
  * mandatory in practice, but a missing one must not break the search.
  */
-export async function searchPlaces(query, bias) {
+export async function searchPlaces(
+  query: string | undefined | null,
+  bias: { lat: number; lon: number } | null,
+): Promise<Choice[]> {
   const q = query?.trim() ?? '';
   if (q.length < MIN_QUERY) return []; // Short prefixes never leave the process.
 
   const key = q.toLowerCase();
-  if (cache.has(key)) return cache.get(key);
+  const hit = cache.get(key); // An empty array is a real answer, and still truthy.
+  if (hit) return hit;
 
   const url = new URL(ENDPOINT);
   url.searchParams.set('q', q);
@@ -76,20 +116,8 @@ export async function searchPlaces(query, bias) {
     url.searchParams.set('lon', String(bias.lon));
   }
 
-  let choices = [];
-  try {
-    const response = await fetch(url, {
-      headers: { 'User-Agent': UA },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`Photon answered ${response.status}`);
-
-    const { features } = await response.json();
-    choices = (features ?? [])
-      .map((feature) => formatPlace(feature.properties))
-      .filter(Boolean)
-      .map((label) => ({ name: label, value: label }));
-  } catch (error) {
+  const { data: choices, error } = await tryCatch(fetchChoices(url));
+  if (error) {
     console.error(`Place lookup for "${q}" failed:`, error.message);
     return []; // Deliberately uncached: a timeout shouldn't poison the query for an hour.
   }

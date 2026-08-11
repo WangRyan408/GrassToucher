@@ -7,16 +7,18 @@ import {
   TimestampStyles,
   time,
 } from 'discord.js';
-import { rebuildDigest } from './digest.js';
-import { embedColor, ensureOpen, toEmbed } from './event.js';
-import { commands, route } from './interactions.js';
-import { isValidTimeZone } from './time.js';
+import { rebuildDigest } from './digest.ts';
+import { embedColor, ensureOpen, toEmbed } from './event.ts';
+import { commands, route } from './interactions.ts';
+import { isValidTimeZone } from './time.ts';
+import type { Config, Ctx } from './types.ts';
+import { tryCatch } from './utils/tryCatch.ts';
 
 // Keep REMINDER_MINUTES comfortably above this, or a sweep can step over the window
 // between "not yet due" and "already started" and skip the ping entirely.
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 
-function loadConfig(env) {
+function loadConfig(env: NodeJS.ProcessEnv): Config {
   const required = ['DISCORD_TOKEN', 'GUILD_ID', 'EVENT_FORUM_ID', 'DIGEST_CHANNEL_ID'];
   const missing = required.filter((key) => !env[key]);
   if (missing.length) throw new Error(`Missing required env vars: ${missing.join(', ')}`);
@@ -24,7 +26,7 @@ function loadConfig(env) {
   const defaultTz = env.DEFAULT_TZ ?? 'UTC';
   if (!isValidTimeZone(defaultTz)) throw new Error(`DEFAULT_TZ is not a valid timezone: ${defaultTz}`);
 
-  const num = (key, fallback) => {
+  const num = (key: string, fallback: number) => {
     const value = env[key] === undefined ? fallback : Number(env[key]);
     if (!Number.isFinite(value) || value < 0) throw new Error(`${key} must be a positive number`);
     return value;
@@ -32,7 +34,7 @@ function loadConfig(env) {
 
   // Coordinates get their own parser: num() rejects negatives, and half the planet has a
   // negative longitude. Reusing it would refuse to boot west of Greenwich.
-  const coord = (key, limit) => {
+  const coord = (key: string, limit: number) => {
     if (!env[key]) return null;
     const value = Number(env[key]);
     if (!Number.isFinite(value) || Math.abs(value) > limit) {
@@ -50,18 +52,20 @@ function loadConfig(env) {
   }
 
   return {
-    placeBias: lat === null ? null : { lat, lon },
-    token: env.DISCORD_TOKEN,
-    guildId: env.GUILD_ID,
-    forumId: env.EVENT_FORUM_ID,
-    digestChannelId: env.DIGEST_CHANNEL_ID,
+    // `lon` is checked too, so neither is null here — the pair check above only proves it to us.
+    placeBias: lat === null || lon === null ? null : { lat, lon },
+    // The four required keys are what the `missing` check just guaranteed.
+    token: env.DISCORD_TOKEN!,
+    guildId: env.GUILD_ID!,
+    forumId: env.EVENT_FORUM_ID!,
+    digestChannelId: env.DIGEST_CHANNEL_ID!,
     defaultTz,
     reminderMinutes: num('REMINDER_MINUTES', 60),
     archiveGraceHours: num('ARCHIVE_GRACE_HOURS', 12),
   };
 }
 
-async function buildContext(client, config) {
+async function buildContext(client: Client<true>, config: Config): Promise<Ctx> {
   const guild = await client.guilds.fetch(config.guildId);
   const forum = await guild.channels.fetch(config.forumId);
   const digestChannel = await guild.channels.fetch(config.digestChannelId);
@@ -83,7 +87,7 @@ async function buildContext(client, config) {
  * lower time bound means a bot that was offline through the window stays quiet rather
  * than announcing an event that already started.
  */
-async function sweep(ctx) {
+async function sweep(ctx: Ctx) {
   const entries = await rebuildDigest(ctx);
   const now = Date.now();
   const reminderMs = ctx.config.reminderMinutes * 60_000;
@@ -116,15 +120,17 @@ async function sweep(ctx) {
 const config = loadConfig(process.env);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once(Events.ClientReady, async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+// `readyClient` is the same object as `client`, but typed Client<true> — logged in, so its
+// `.user` is non-null. That's what lets Ctx promise a real user id all the way down.
+client.once(Events.ClientReady, async (readyClient) => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
   if (!config.placeBias) {
     console.warn(
       'PLACE_BIAS_LAT/PLACE_BIAS_LON are unset, so address suggestions are ranked globally — ' +
         'searching "dolores park" can return Argentina. Set them to your area.',
     );
   }
-  const ctx = await buildContext(client, config);
+  const ctx = await buildContext(readyClient, config);
 
   // Guild-scoped registration is idempotent and propagates instantly, so there's no
   // separate deploy step to remember.
@@ -135,12 +141,20 @@ client.once(Events.ClientReady, async () => {
       await route(interaction, ctx);
     } catch (error) {
       console.error('Interaction failed:', error);
-      const sorry = { content: 'Something went wrong. Check the bot logs.', flags: MessageFlags.Ephemeral };
+      const sorry = {
+        content: 'Something went wrong. Check the bot logs.',
+        flags: MessageFlags.Ephemeral as const,
+      };
       if (interaction.isRepliable()) {
-        await (interaction.deferred || interaction.replied
-          ? interaction.followUp(sorry)
-          : interaction.reply(sorry)
-        ).catch(() => {});
+        // Swallowed: the interaction may already have expired, and we're in the catch block
+        // of the thing that went wrong — there's nowhere left to report to but the log above.
+        // `<unknown>`: followUp and reply resolve to different things, and the result is
+        // discarded, so there's nothing to gain from making them agree.
+        await tryCatch<unknown>(
+          interaction.deferred || interaction.replied
+            ? interaction.followUp(sorry)
+            : interaction.reply(sorry),
+        );
       }
     }
   });
@@ -148,7 +162,7 @@ client.once(Events.ClientReady, async () => {
   // Deleting a post is how you really cancel an event, so it shouldn't wait out the sweep.
   // Debounced because clearing out several posts fires one event each, and every rebuild
   // re-reads the whole forum.
-  let pending;
+  let pending: ReturnType<typeof setTimeout> | undefined;
   client.on(Events.ThreadDelete, (thread) => {
     if (thread.parentId !== ctx.forum.id) return;
     clearTimeout(pending);
