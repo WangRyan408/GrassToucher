@@ -137,15 +137,19 @@ why cancelling is a command rather than something you do from the post's context
 ## Development
 
 ```sh
-npm install
-npm test           # vitest
-npm run typecheck  # tsc — the real gate; it only checks, it never emits
-npm run dev        # reads .env via node --env-file
+bun install
+bun test           # vitest
+bun run typecheck  # tsc — the real gate; it only checks, it never emits
+bun run dev        # reads .env via --env-file
 ```
 
-Node 24 or newer, because it runs the TypeScript sources directly by stripping the types out.
-There is no build step and no `dist/` — which is also why every relative import names a `.ts`
-file: Node resolves specifiers literally and won't rewrite `./event.js` for you.
+Bun 1 or newer, because it runs the TypeScript sources directly. There is no build step and no
+`dist/` — which is also why every relative import names a `.ts` file: specifiers resolve
+literally, and nothing rewrites `./event.js` for you.
+
+`bun.lock` is the lockfile. Node still runs this fine if you'd rather — the sources use no
+bun-specific API, and Node 24 strips types too — but the dependency versions are pinned in a
+format only bun reads.
 
 `src/` is the bot, `test/` mirrors it — `test/event.test.ts` covers `src/event.ts`, and so on.
 Only three files have logic worth testing: timezone conversion, the embed⇄event codec, and
