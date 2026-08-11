@@ -30,7 +30,27 @@ function loadConfig(env) {
     return value;
   };
 
+  // Coordinates get their own parser: num() rejects negatives, and half the planet has a
+  // negative longitude. Reusing it would refuse to boot west of Greenwich.
+  const coord = (key, limit) => {
+    if (!env[key]) return null;
+    const value = Number(env[key]);
+    if (!Number.isFinite(value) || Math.abs(value) > limit) {
+      throw new Error(`${key} must be a number between -${limit} and ${limit}`);
+    }
+    return value;
+  };
+
+  const lat = coord('PLACE_BIAS_LAT', 90);
+  const lon = coord('PLACE_BIAS_LON', 180);
+  // One without the other silently does nothing, which surfaces as "why is it suggesting
+  // Argentina" rather than as a config error.
+  if ((lat === null) !== (lon === null)) {
+    throw new Error('Set both PLACE_BIAS_LAT and PLACE_BIAS_LON, or neither');
+  }
+
   return {
+    placeBias: lat === null ? null : { lat, lon },
     token: env.DISCORD_TOKEN,
     guildId: env.GUILD_ID,
     forumId: env.EVENT_FORUM_ID,
@@ -98,6 +118,12 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  if (!config.placeBias) {
+    console.warn(
+      'PLACE_BIAS_LAT/PLACE_BIAS_LON are unset, so address suggestions are ranked globally — ' +
+        'searching "dolores park" can return Argentina. Set them to your area.',
+    );
+  }
   const ctx = await buildContext(client, config);
 
   // Guild-scoped registration is idempotent and propagates instantly, so there's no

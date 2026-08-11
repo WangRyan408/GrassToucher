@@ -62,8 +62,11 @@ export function displayTitle(event, cap) {
   return event.title.slice(0, cap - CANCELLED_SUFFIX.length) + CANCELLED_SUFFIX;
 }
 
-/** Who hears about a cancellation: everyone who might turn up, minus whoever cancelled it. */
-export function cancelRecipients(event, actorId) {
+/**
+ * Who hears about a change of plan: everyone who might turn up, minus whoever made it.
+ * The same audience both ways — anyone told an event was off has to be told it's back on.
+ */
+export function notifyRecipients(event, actorId) {
   const ids = new Set([...event.rsvp.going, ...event.rsvp.maybe, event.organizerId]);
   ids.delete(actorId);
   ids.delete(null);
@@ -137,18 +140,22 @@ export function isOurs(message, clientUserId) {
 }
 
 /**
- * Move `userId` to `choice`, or off every list if they were already there.
- * Mutates `event.rsvp`. Returns 'added' | 'moved' | 'withdrawn' | 'full'.
+ * Move `userId` to `choice`. Clicking the list they're already on does nothing: a button
+ * that quietly drops your RSVP on a second click loses answers to stray double-clicks, and
+ * "Can't" is already the way to say you're not coming.
+ *
+ * Mutates `event.rsvp`. Returns 'added' | 'moved' | 'unchanged' | 'full'.
  */
 export function applyRsvp(event, userId, choice) {
   const current = Object.keys(event.rsvp).find((key) => event.rsvp[key].includes(userId));
-  if (current !== choice && event.rsvp[choice].length >= MAX_PER_LIST) return 'full';
+  if (current === choice) return 'unchanged';
+  // Only reachable when the answer is really changing, so their own slot can't count
+  // against them on a list that's already full.
+  if (event.rsvp[choice].length >= MAX_PER_LIST) return 'full';
 
   for (const key of Object.keys(event.rsvp)) {
     event.rsvp[key] = event.rsvp[key].filter((id) => id !== userId);
   }
-  if (current === choice) return 'withdrawn';
-
   event.rsvp[choice].push(userId);
   return current ? 'moved' : 'added';
 }
