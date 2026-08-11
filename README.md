@@ -148,22 +148,10 @@ that's the one assumption in the design worth knowing about.
 
 Not commitments — the next three things worth doing, in the order they'd pay off.
 
-**1. Convert to TypeScript.** The embed codec is where types earn their keep: `fromEmbed`
-returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and today
-nothing enforces that assumption except one round-trip test. discord.js ships its own types, so
-the work is mostly a `tsc` step plus annotating `src/`. The real cost is what's lost: this is
-currently plain ESM that runs straight off the filesystem with no build, which is why
-`npm run dev` and the Dockerfile are three lines each.
+**✅ done · 🚧 in progress · ❌ not started**
 
-**2. Looser `when:` input.** `YYYY-MM-DD HH:MM` is the only accepted format and it is the
-most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse.
-Autocomplete is the right surface for it — the same interaction `where:` already uses, resolving
-a typed phrase to a concrete date the user can read back *before* they submit, which is what
-makes fuzzy parsing safe rather than surprising. `timezone:` deserves the same treatment for a
-different reason: IANA names are hard to type and impossible to guess.
-
-**3. A `tryCatch` wrapper.** Fallible calls are guarded ad hoc right now — `Promise.allSettled`
-for the DM fan-out, `.catch(() => {})` on the error reply, a hand-rolled try/catch inside the
-autocomplete handler because the global one structurally can't reach it. One helper returning
-`[result, error]` would make those uniform, and more usefully make it visible which calls are
-*deliberately* left unguarded.
+| Status | Change | Why, and what it costs |
+|:---:|---|---|
+| ❌ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and nothing enforces it today but one round-trip test. discord.js ships its own types, so the work is mostly a `tsc` step plus annotating `src/`. The cost is what's lost — this is currently plain ESM that runs straight off the filesystem, which is why `npm run dev` and the Dockerfile are three lines each. |
+| ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing already exists for `where:`, and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. `timezone:` deserves it for a different reason: IANA names are impossible to guess. |
+| ❌ | **A `tryCatch` wrapper** | Fallible calls are guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a hand-rolled try/catch in the autocomplete handler because the global one structurally can't reach it. One helper returning `[result, error]` would make those uniform, and more usefully make it visible which calls are *deliberately* left unguarded. |
