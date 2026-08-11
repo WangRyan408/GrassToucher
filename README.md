@@ -58,8 +58,8 @@ there's no deploy step.
 
 | Command | Notes |
 |---|---|
-| `/event create title: when: [where:] [description:] [timezone:]` | `when` is `YYYY-MM-DD HH:MM` on a 24-hour clock. `timezone` is an IANA name like `Europe/Berlin`, defaulting to `DEFAULT_TZ`. |
-| `/event edit [title:] [when:] [where:] [description:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
+| `/event create title: when: [where:] [description:] [timezone:]` | `when` is `YYYY-MM-DD HH:MM` on a 24-hour clock. `timezone` suggests zones as you type — a city (`Berlin`), an abbreviation (`PST`) or a full IANA name all work, and it defaults to `DEFAULT_TZ`. |
+| `/event edit [title:] [when:] [where:] [description:] [timezone:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
 | `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
 
 Times are stored as an instant and rendered with Discord's own timestamp markup, so
@@ -87,6 +87,23 @@ Addresses are OpenStreetMap data — **© OpenStreetMap contributors**,
 [ODbL](https://www.openstreetmap.org/copyright). That licence is also *why* this bot can keep
 an address in an embed forever: Google's and Mapbox's terms don't permit storing their
 geocoding results, which rules them out of a design where the post is the record.
+
+## Timezones
+
+`timezone:` suggests zones as you type, from whatever tzdata the runtime ships — no list to
+keep current and nothing to configure. A city is enough (`berlin`, `new york`), and so is a
+US or UK abbreviation (`PST`, `ET`, `CET`, `UTC`). Full IANA names still work, including
+legacy links like `US/Eastern`. Before the first keystroke it offers `DEFAULT_TZ` and a
+handful of common zones.
+
+Typed text that pins down exactly one zone is accepted. Something that matches many —
+`america`, `europe` — is not: the reply lists the nearest few instead of picking a city on
+your behalf.
+
+Abbreviations map to city zones on purpose. ICU accepts `EST` as a real zone ID, but it's a
+fixed −5 that never observes daylight saving, so a July event booked in "EST" landed an hour
+late; `EST` now means `America/New_York`. Ambiguous ones are left out rather than guessed —
+`IST` is India, Ireland *and* Israel, so it falls through to the candidate list.
 
 ## Cancelling
 
@@ -120,15 +137,19 @@ why cancelling is a command rather than something you do from the post's context
 ## Development
 
 ```sh
-npm install
-npm test           # vitest
-npm run typecheck  # tsc — the real gate; it only checks, it never emits
-npm run dev        # reads .env via node --env-file
+bun install
+bun test           # vitest
+bun run typecheck  # tsc — the real gate; it only checks, it never emits
+bun run dev        # reads .env via --env-file
 ```
 
-Node 24 or newer, because it runs the TypeScript sources directly by stripping the types out.
-There is no build step and no `dist/` — which is also why every relative import names a `.ts`
-file: Node resolves specifiers literally and won't rewrite `./event.js` for you.
+Bun 1 or newer, because it runs the TypeScript sources directly. There is no build step and no
+`dist/` — which is also why every relative import names a `.ts` file: specifiers resolve
+literally, and nothing rewrites `./event.js` for you.
+
+`bun.lock` is the lockfile. Node still runs this fine if you'd rather — the sources use no
+bun-specific API, and Node 24 strips types too — but the dependency versions are pinned in a
+format only bun reads.
 
 `src/` is the bot, `test/` mirrors it — `test/event.test.ts` covers `src/event.ts`, and so on.
 Only three files have logic worth testing: timezone conversion, the embed⇄event codec, and
@@ -139,7 +160,9 @@ address formatting. Everything else is Discord I/O. The suite makes no network c
 | `src/index.ts` | Config validation, boot, interaction routing, the 10-minute sweep |
 | `src/event.ts` | The model: embed codec, forum listing, RSVP rules |
 | `src/digest.ts` | Renders the digest and edits the pin in place |
-| `src/interactions.ts` | Slash command definitions, handlers, cancel/reinstate DMs |
+| `src/interactions.ts` | Assembles `/event` from `src/commands/`, routes every interaction, owns the RSVP buttons and autocomplete |
+| `src/commands/create.ts` · `edit.ts` · `cancel.ts` | One file per subcommand: its slice of the `/event` definition next to the handler that serves it. `cancel.ts` also owns the confirm button and the cancel/reinstate DMs |
+| `src/commands/shared.ts` | What more than one subcommand needs: reply shapes, `when:`/`timezone:` parsing, the organizer-or-mod guard |
 | `src/places.ts` | Address lookup for `where:` — Photon adapter and label formatting |
 | `src/time.ts` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
 | `src/types.ts` | The shapes that cross module boundaries: `Event`, `Config`, `Ctx` |
@@ -159,6 +182,7 @@ Not commitments — what's worth doing next, and what's already landed.
 
 | Status | Change | Why, and what it costs |
 |:---:|---|---|
-| ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing already exists for `where:`, and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. `timezone:` deserves it for a different reason: IANA names are impossible to guess. |
+| ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and now the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing exists for `where:` and `timezone:` both — and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. |
+| ✅ | **Looser `timezone:` input** | IANA names are impossible to guess, so the option is autocompleted from `Intl.supportedValuesOf('timeZone')` — no dependency, no list to maintain, and it tracks the runtime's own tzdata. Typed text resolves when it pins down one zone. The find was that strictness wasn't even buying correctness: ICU accepts `EST`, and `EST` is a fixed −5 with no daylight saving, so the old validator waved through the one input most likely to be an hour wrong. `DEFAULT_TZ` goes through the same resolver now, since it had the same hole. |
 | ✅ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and only one round-trip test enforced it. Nothing was lost to a build step in the end — Node strips types natively, so it still runs straight off the filesystem and the Dockerfile is still three lines; `typescript` is a devDependency that only ever type-checks. The cost is a Node 24 floor and `.ts` in every relative import. |
 | ✅ | **A `tryCatch` wrapper** | Fallible calls were guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a bare try/catch around the digest pin and the starter-message fetch. `src/utils/tryCatch.ts` returns `{ data, error }` and now covers all five, which also makes the exception visible: `handleAutocomplete` keeps its own try/catch because `getFocused(true)` throws *synchronously* and the helper only takes a promise. |

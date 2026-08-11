@@ -10,7 +10,7 @@ import {
 import { rebuildDigest } from './digest.ts';
 import { embedColor, ensureOpen, toEmbed } from './event.ts';
 import { commands, route } from './interactions.ts';
-import { isValidTimeZone } from './time.ts';
+import { resolveTimeZone } from './time.ts';
 import type { Config, Ctx } from './types.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
@@ -23,8 +23,10 @@ function loadConfig(env: NodeJS.ProcessEnv): Config {
   const missing = required.filter((key) => !env[key]);
   if (missing.length) throw new Error(`Missing required env vars: ${missing.join(', ')}`);
 
-  const defaultTz = env.DEFAULT_TZ ?? 'UTC';
-  if (!isValidTimeZone(defaultTz)) throw new Error(`DEFAULT_TZ is not a valid timezone: ${defaultTz}`);
+  // Through the same resolver the slash option uses, so `DEFAULT_TZ=EST` can't boot into the
+  // fixed-offset zone that ignores daylight saving.
+  const defaultTz = resolveTimeZone(env.DEFAULT_TZ ?? 'UTC');
+  if (!defaultTz) throw new Error(`DEFAULT_TZ is not a timezone I recognise: ${env.DEFAULT_TZ}`);
 
   const num = (key: string, fallback: number) => {
     const value = env[key] === undefined ? fallback : Number(env[key]);

@@ -3,7 +3,7 @@ services:
     build: .
     env_file: .env
     restart: unless-stopped
-    # Node isn't a well-behaved PID 1; this forwards SIGTERM so `down` is quick.
+    # bun is no better a PID 1 than Node was; this forwards SIGTERM so `down` is quick.
     init: true
     # No volumes: every event lives in Discord, so the container holds no state.
     # No ports: the bot dials out over a websocket and never listens.

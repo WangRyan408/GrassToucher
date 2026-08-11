@@ -1,14 +1,16 @@
-# 24 for type stripping: Node runs the .ts sources as-is, so there's no build stage and
-# `npm ci --omit=dev` still holds — typescript is only ever used to type-check.
-FROM node:24-alpine
+# bun runs the .ts sources as-is, so there's still no build stage, and `--production` holds
+# for the same reason `--omit=dev` did — typescript is only ever used to type-check.
+FROM oven/bun:1-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# --frozen-lockfile so a stale bun.lock fails the build instead of quietly resolving newer
+# versions than anything was tested against.
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
 
 COPY src ./src
 
-USER node
-CMD ["node", "src/index.ts"]
+USER bun
+CMD ["bun", "src/index.ts"]
