@@ -15,6 +15,12 @@ import type {
 
 export type RsvpChoice = 'going' | 'maybe' | 'no';
 
+/** One autocomplete suggestion, shaped for `interaction.respond()`, which wants name/value. */
+export interface Choice {
+  name: string;
+  value: string;
+}
+
 export type Rsvp = Record<RsvpChoice, string[]>;
 
 /**

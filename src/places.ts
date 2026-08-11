@@ -8,6 +8,7 @@
  * Nominatim is not an option here — its usage policy lists auto-complete under
  * "Unacceptable Use".
  */
+import type { Choice } from './types.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 const ENDPOINT = 'https://photon.komoot.io/api/';
@@ -34,12 +35,6 @@ export interface PhotonProperties {
   city?: string;
   state?: string;
   [key: string]: unknown;
-}
-
-/** Shaped for `interaction.respond()`, which wants name/value pairs. */
-export interface Choice {
-  name: string;
-  value: string;
 }
 
 /**
