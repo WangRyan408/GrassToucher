@@ -23,6 +23,7 @@ import {
   rsvpRow,
   toEmbed,
 } from './event.js';
+import { searchPlaces } from './places.js';
 import { TIME_FORMAT, isValidTimeZone, zonedToDate } from './time.js';
 
 export const commands = [
@@ -43,7 +44,11 @@ export const commands = [
             .setRequired(true),
         )
         .addStringOption((o) =>
-          o.setName('where').setDescription('Location or link').setMaxLength(1024),
+          o
+            .setName('where')
+            .setDescription('Location — type to search OpenStreetMap, or write anything')
+            .setMaxLength(1024)
+            .setAutocomplete(true),
         )
         .addStringOption((o) => o.setName('description').setDescription('What is this event?'))
         .addStringOption((o) =>
@@ -57,7 +62,11 @@ export const commands = [
         .addStringOption((o) => o.setName('title').setDescription('New name').setMaxLength(100))
         .addStringOption((o) => o.setName('when').setDescription(`New start time, ${TIME_FORMAT}`))
         .addStringOption((o) =>
-          o.setName('where').setDescription('New location').setMaxLength(1024),
+          o
+            .setName('where')
+            .setDescription('New location — type to search OpenStreetMap, or write anything')
+            .setMaxLength(1024)
+            .setAutocomplete(true),
         )
         .addStringOption((o) => o.setName('description').setDescription('New description'))
         .addStringOption((o) =>
@@ -347,7 +356,29 @@ async function handleRsvp(interaction, ctx) {
   await rebuildDigest(ctx);
 }
 
+/**
+ * Suggest addresses while someone types `where:`.
+ *
+ * Owns its error handling, unlike every other handler here: an autocomplete interaction is
+ * not repliable, so index.js's catch-all can't answer one, and an unanswered interaction
+ * leaves "loading options failed" sitting in the client. Every failure is an empty list.
+ */
+async function handleAutocomplete(interaction, ctx) {
+  try {
+    const focused = interaction.options.getFocused(true); // Throws with nothing focused.
+    if (focused.name !== 'where') return interaction.respond([]);
+    await interaction.respond(await searchPlaces(focused.value, ctx.config.placeBias));
+  } catch (error) {
+    console.error('Autocomplete failed:', error);
+    // May itself throw if the respond above already landed; nothing left to do either way.
+    await interaction.respond([]).catch(() => {});
+  }
+}
+
 export async function route(interaction, ctx) {
+  // First: this fires on every keystroke, so it's the busiest branch by a wide margin.
+  if (interaction.isAutocomplete()) return handleAutocomplete(interaction, ctx);
+
   if (interaction.isChatInputCommand() && interaction.commandName === 'event') {
     const sub = interaction.options.getSubcommand();
     if (sub === 'create') return handleCreate(interaction, ctx);

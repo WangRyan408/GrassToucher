@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isValidTimeZone, zonedToDate } from './time.js';
+import { isValidTimeZone, zonedToDate } from '../src/time.js';
 
 const iso = (input, tz) => zonedToDate(input, tz)?.toISOString() ?? null;
 

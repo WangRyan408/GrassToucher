@@ -11,7 +11,7 @@ import {
   fromEmbed,
   notifyRecipients,
   toEmbed,
-} from './event.js';
+} from '../src/event.js';
 
 const sample = (over = {}) => ({
   title: 'Touch Grass',

@@ -65,6 +65,29 @@ there's no deploy step.
 Times are stored as an instant and rendered with Discord's own timestamp markup, so
 everyone reads them in their own local timezone.
 
+## Locations
+
+`where:` searches OpenStreetMap as you type — three characters in, suggestions start
+appearing. Picking one stores a real, consistently formatted address instead of whatever each
+person felt like typing.
+
+It suggests, it never requires. "behind the gym" and "the usual spot" still submit fine.
+
+Suggestions come from [Photon](https://photon.komoot.io), which needs no API key and no
+account, so there's nothing to configure beyond `PLACE_BIAS_LAT` / `PLACE_BIAS_LON` —
+coordinates near you, which tell it which "Dolores Park" you meant. Leave them unset and
+results are ranked globally; the bot warns about that on boot. Somewhere genuinely far away
+still resolves either way, because the coordinates only break ties.
+
+A picked address is capped at 100 characters, Discord's hard limit on an autocomplete choice.
+Trailing parts drop off (state, then city) rather than a word being cut in half. Text you type
+yourself isn't a choice, so it can still run to 1024.
+
+Addresses are OpenStreetMap data — **© OpenStreetMap contributors**,
+[ODbL](https://www.openstreetmap.org/copyright). That licence is also *why* this bot can keep
+an address in an embed forever: Google's and Mapbox's terms don't permit storing their
+geocoding results, which rules them out of a design where the post is the record.
+
 ## Cancelling
 
 `/event cancel` keeps the post. It renames it to `Title — CANCELLED`, turns the embed red,
@@ -102,8 +125,9 @@ npm test          # node --test, no framework
 npm run dev       # reads .env via node --env-file
 ```
 
-`src/time.js` and `src/event.js` hold the only logic worth testing — timezone conversion
-and the embed⇄event codec. Everything else is Discord I/O.
+`src/` is the bot, `test/` mirrors it — `test/event.test.js` covers `src/event.js`, and so on.
+Only three files have logic worth testing: timezone conversion, the embed⇄event codec, and
+address formatting. Everything else is Discord I/O. The suite makes no network calls.
 
 | File | Job |
 |---|---|
@@ -111,6 +135,7 @@ and the embed⇄event codec. Everything else is Discord I/O.
 | `src/event.js` | The model: embed codec, forum listing, RSVP rules |
 | `src/digest.js` | Renders the digest and edits the pin in place |
 | `src/interactions.js` | Slash command definitions, handlers, cancel/reinstate DMs |
+| `src/places.js` | Address lookup for `where:` — Photon adapter and label formatting |
 | `src/time.js` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
 
 ### If embeds come back empty
@@ -118,3 +143,27 @@ and the embed⇄event codec. Everything else is Discord I/O.
 The bot reads only its own messages, which is why it needs no privileged intents. If event
 fields ever read back blank, enable **Message Content Intent** in the developer portal —
 that's the one assumption in the design worth knowing about.
+
+## Roadmap
+
+Not commitments — the next three things worth doing, in the order they'd pay off.
+
+**1. Convert to TypeScript.** The embed codec is where types earn their keep: `fromEmbed`
+returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and today
+nothing enforces that assumption except one round-trip test. discord.js ships its own types, so
+the work is mostly a `tsc` step plus annotating `src/`. The real cost is what's lost: this is
+currently plain ESM that runs straight off the filesystem with no build, which is why
+`npm run dev` and the Dockerfile are three lines each.
+
+**2. Looser `when:` input.** `YYYY-MM-DD HH:MM` is the only accepted format and it is the
+most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse.
+Autocomplete is the right surface for it — the same interaction `where:` already uses, resolving
+a typed phrase to a concrete date the user can read back *before* they submit, which is what
+makes fuzzy parsing safe rather than surprising. `timezone:` deserves the same treatment for a
+different reason: IANA names are hard to type and impossible to guess.
+
+**3. A `tryCatch` wrapper.** Fallible calls are guarded ad hoc right now — `Promise.allSettled`
+for the DM fan-out, `.catch(() => {})` on the error reply, a hand-rolled try/catch inside the
+autocomplete handler because the global one structurally can't reach it. One helper returning
+`[result, error]` would make those uniform, and more usefully make it visible which calls are
+*deliberately* left unguarded.

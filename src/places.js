@@ -1,0 +1,100 @@
+/**
+ * Address lookup for the `where:` option, backed by Photon (photon.komoot.io).
+ *
+ * Photon is OpenStreetMap data, needs no API key, and is built for search-as-you-type. It
+ * also matters that ODbL lets us *store* the result: this bot writes the address into an
+ * embed and keeps it forever, which Google's and Mapbox's standard terms forbid.
+ *
+ * Nominatim is not an option here — its usage policy lists auto-complete under
+ * "Unacceptable Use".
+ */
+const ENDPOINT = 'https://photon.komoot.io/api/';
+
+/** Discord fires an autocomplete interaction on every keystroke, including the first. */
+const MIN_QUERY = 3;
+/** Discord allows 25 choices. Past about 8 it's just scrolling. */
+const LIMIT = 8;
+/** Autocomplete cannot be deferred and the interaction dies at 3s, so leave headroom. */
+const TIMEOUT_MS = 2000;
+/** Discord caps a choice's name and value at 100 characters each. */
+const CHOICE_CAP = 100;
+
+const UA = 'GrassToucher (Discord event bot; https://github.com/WangRyan408/GrassToucher)';
+
+/**
+ * Photon GeoJSON properties → one human-readable line.
+ *
+ * Pure, and the only part of this file worth testing: everything else is a fetch.
+ */
+export function formatPlace(properties = {}) {
+  const { name, housenumber, street, city, state } = properties;
+
+  const parts = [
+    // A street feature puts the street in `name`, so using both would repeat it.
+    name === street ? null : name,
+    [housenumber, street].filter(Boolean).join(' '),
+    city,
+    state,
+  ].filter(Boolean);
+
+  // Drop from the tail — losing "California" reads better than a word cut in half.
+  while (parts.length > 1 && parts.join(', ').length > CHOICE_CAP) parts.pop();
+  return parts.join(', ').slice(0, CHOICE_CAP);
+}
+
+/**
+ * ponytail: crude bound, not an LRU — past the ceiling the whole thing goes. Photon's own
+ * `Cache-Control: max-age=3600` says caching is welcome, so this is politeness to them more
+ * than speed for us. Swap in an LRU only if the hit rate ever matters.
+ */
+const cache = new Map();
+const CACHE_MAX = 500;
+
+/**
+ * Suggestions for `query`, ready to hand to `interaction.respond()`.
+ *
+ * Never throws and never returns an over-long choice. An autocomplete that errors shows the
+ * user "loading options failed" with no way to dismiss it, so every failure here is an empty
+ * list instead.
+ *
+ * `bias` is `{lat, lon}` or null. Without it results are scattered worldwide — "dolores par"
+ * returns Argentina and Spain rather than the park two miles away — so it is close to
+ * mandatory in practice, but a missing one must not break the search.
+ */
+export async function searchPlaces(query, bias) {
+  const q = query?.trim() ?? '';
+  if (q.length < MIN_QUERY) return []; // Short prefixes never leave the process.
+
+  const key = q.toLowerCase();
+  if (cache.has(key)) return cache.get(key);
+
+  const url = new URL(ENDPOINT);
+  url.searchParams.set('q', q);
+  url.searchParams.set('limit', String(LIMIT));
+  if (bias) {
+    url.searchParams.set('lat', String(bias.lat));
+    url.searchParams.set('lon', String(bias.lon));
+  }
+
+  let choices = [];
+  try {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`Photon answered ${response.status}`);
+
+    const { features } = await response.json();
+    choices = (features ?? [])
+      .map((feature) => formatPlace(feature.properties))
+      .filter(Boolean)
+      .map((label) => ({ name: label, value: label }));
+  } catch (error) {
+    console.error(`Place lookup for "${q}" failed:`, error.message);
+    return []; // Deliberately uncached: a timeout shouldn't poison the query for an hour.
+  }
+
+  if (cache.size >= CACHE_MAX) cache.clear();
+  cache.set(key, choices);
+  return choices;
+}

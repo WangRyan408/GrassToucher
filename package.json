@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --env-file=.env src/index.js",
-    "test": "node --test src/*.test.js"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "discord.js": "^14.27.0"
