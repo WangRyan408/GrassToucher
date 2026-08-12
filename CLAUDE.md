@@ -17,9 +17,13 @@ bun run typecheck  # tsc, noEmit. The real gate: nothing here is compiled, only 
 bun run dev
 ```
 
-Bun is the declared toolchain (`bun.lock` is the lockfile), but nothing in `src/` uses a
-bun-specific API. On a machine without bun, `npx vitest run` and `npx tsc --noEmit` under Node
-24 do the same job — worth knowing, because that is how the current work was verified.
+Bun is the declared toolchain (`bun.lock` is the lockfile) and the only one installed on this
+host — there is no `node` and no `npx`. Nothing in `src/` uses a bun-specific API, so Node 24
+runs it fine elsewhere, but here `bun run …` is the only thing that works.
+
+Watch the exit status when you pipe the gate through `tail` for a short log: a pipeline reports
+the *last* command's status, so a missing interpreter prints nothing and the `&& echo "clean"`
+after it fires anyway. Check `${PIPESTATUS[0]}`, or don't pipe.
 
 ## Invariants
 
@@ -39,6 +43,11 @@ bun-specific API. On a machine without bun, `npx vitest run` and `npx tsc --noEm
   command, and that script derives the compose directory from its own location. Moving or
   renaming the checkout on the host breaks the deploy with a bare "command not found" and no
   hint as to why — the fix is the `command=` line, not anything in this repo.
+- **A forced command silently swallows a heredoc piped over SSH.** sshd runs the pinned command
+  and leaves the client's string in `SSH_ORIGINAL_COMMAND`, so the body of an `ssh host <<'EOF'`
+  lands on stdin unread and every variable it was carrying vanishes without an error. That is why
+  the remote half is a versioned script and `deploy.yml` sends exactly one thing, the tag — don't
+  "simplify" it back into a heredoc.
 - **The deploy only works from inside the WireGuard tunnel.** The host is behind NAT with no
   public SSH address, so `SSH_HOST: 192.168.50.9` in `deploy.yml` is unreachable until the runner
   brings up `wg0` from `WG_CONFIG`. Five things about that, each of which has already cost time:
@@ -100,69 +109,3 @@ Decided against for now, not forgotten. The reason it was left is the useful par
   raising `TIMEOUT_MS` is not the alternative (autocomplete can't be deferred and dies at 3s), and
   why self-hosting Photon is the roadmap answer rather than this.
 
-## Where things stand — 2026-08-11
-
-*Delete this section once `feat/ci-and-deploy` is merged.*
-
-**On `main`** (merged as PR #4, `fa3aa5e`): bun is the toolchain and `bun.lock` the lockfile,
-the Dockerfile runs `oven/bun:1-alpine`, `timezone:` autocompletes from
-`Intl.supportedValuesOf('timeZone')` and takes loose input, and `src/interactions.ts` is split
-into `src/commands/{create,edit,cancel,shared}.ts`.
-
-**Open: `feat/ci-and-deploy`**, pushed, four commits off `main`, **PR not opened yet**.
-
-Opening it has to happen in a browser: this host has no `gh` CLI, no GitHub token in the
-environment, and sudo wants a password, so there is no way to do it from a session here. The
-compare URL is `https://github.com/WangRyan408/GrassToucher/compare/main...feat/ci-and-deploy`.
-
-1. `0680df0` — the three workflows, `image: …:${TAG:-latest}` in `docker-compose.yaml`, and the
-   README's Deployment section. `.github/workflows/ci.yml` is `on: pull_request` +
-   `workflow_call` only: `publish.yml` calls it, so a `push:` trigger would run the suite twice
-   per merge.
-2. `3298a0d`, `f27996e` — this file, and a correction to it.
-3. The head commit — `deploy/host-deploy.sh`, `deploy.yml` cut down to `ssh … "$TAG"` plus the
-   WireGuard tunnel, and the README's Locations notes. Two independent findings forced that shape,
-   and both are already written up above as invariants:
-   - A forced command silently breaks a heredoc piped over SSH. sshd runs the pinned command and
-     leaves the client's string in `SSH_ORIGINAL_COMMAND`, so the heredoc lands on stdin unread and
-     `TAG` vanishes. Both halves had to move to the host together, and `DEPLOY_PATH` stopped being
-     a secret.
-   - The host is behind NAT, so the workflow brings up `wg0` from `WG_CONFIG` and SSHes to
-     `192.168.50.9`. `SSH_HOST` stopped being a secret too. The four that remain (`WG_CONFIG`,
-     `SSH_KEY`, `SSH_KNOWN_HOSTS`, `SSH_USER`) are **environment** secrets under `production`
-     rather than repo secrets — `ci.yml` can read repo secrets on any same-repo PR.
-
-### What's verified now, and the one thing that isn't
-
-Two of the three old unknowns were settled locally on 2026-08-12, on this host, before CI ever
-ran:
-
-1. ✅ **The image builds.** `bun install --frozen-lockfile --production` resolves 24 packages
-   against this `bun.lock` with no complaint, and the container logs in and reaches `Ready.`
-2. ✅ **vitest under bun.** `bun run test` → 39 tests, 3 files, all passing. No `setup-node`
-   fallback needed.
-3. ❌ **The deploy has still never run end to end**, and can't be until the human-only half
-   exists: the `ci` WireGuard peer, the four environment secrets, the forced-command line in
-   `authorized_keys`, and a GHCR package the host can read. The first run is the test. Two
-   things make its failures legible rather than silent — the `ping` after `wg-quick up` (which
-   exits 0 even when the far end is unreachable) and the healthcheck in `host-deploy.sh` (so a
-   wrong `DISCORD_TOKEN` fails the deploy instead of passing it).
-
-### Next steps
-
-1. Watch the PR's `ci.yml` run — the first time that workflow has ever executed. The `image` job is
-   the interesting one; typecheck and the suite have both been run locally under bun already.
-2. Human-only, can't be done from here. `.env` on the host is already written; what's left is the
-   `ci` WireGuard peer (add it to `WIREGUARD_PEERS` in `~/jellyfin-setup/.env` and recreate the
-   container — that briefly drops the phone/laptop/tablet peers, whose keys survive in the config
-   volume), then narrow the generated peer config's `AllowedIPs` to `192.168.50.9/32` and delete
-   its `DNS =` line before it becomes `WG_CONFIG`. Then the four environment secrets and the
-   forced-command line in `authorized_keys`. All the recipes are in the README.
-3. Merge → Publish pushes the image → Deploy fires on its own and **401s**, because Publish
-   creates the GHCR package private. Flip it to public, then re-run Deploy from the Actions tab.
-   That ordering is unavoidable: the package doesn't exist to be made public until something has
-   pushed to it.
-4. Then the open roadmap row: **looser `when:` input**. `YYYY-MM-DD HH:MM` is now the
-   most-rejected input in the bot. The autocomplete plumbing that `timezone:` and `where:` use
-   is already there, and echoing the resolved date back before submit is what would make fuzzy
-   parsing safe rather than surprising.

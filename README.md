@@ -224,12 +224,14 @@ the WireGuard tunnel that's already there, as a peer of its own, and reaches ssh
 WireGuard's UDP port is forwarded, and it already was.
 
 **`SSH_HOST` is the host's LAN address** (`192.168.50.9` in `deploy.yml`), not the WireGuard server
-address. If your WireGuard server runs in a bridged container — the usual `linuxserver/wireguard`
-setup — then `10.13.13.1` belongs to the *container*, which claims it as a local address and has no
-sshd on it, so aiming a deploy there gets connection refused and looks exactly like a firewall
-problem. The container NATs onto the LAN instead, which is the path every other peer already uses
-to reach services on the box. Check it with `docker exec wireguard ip route get 10.13.13.1`: if
-that says `local … dev lo`, the address is the container's and you want the LAN one.
+address. The server address is the ambiguous one: `10.13.13.1` can belong to a bridged
+`linuxserver/wireguard` container, which claims it as a local address and runs no sshd, or to a
+`wg0` on the host itself, which does — and nothing about the address says which you have. Both at
+once is possible too, if the container's config was ever imported onto the host. Aiming a deploy at
+the wrong one gets connection refused and reads exactly like a firewall problem. Two commands
+disambiguate — `docker exec wireguard ip route get 10.13.13.1` (`local … dev lo` means the
+container owns it) and `ip -brief addr show wg0` on the host — but the LAN address needs neither,
+and it's the path every other peer already uses to reach services on the box.
 
 That peer's config is the `WG_CONFIG` secret, and it wants three edits over whatever your WireGuard
 server generates:
@@ -246,14 +248,24 @@ host. And a `DNS =` line makes `wg-quick` rewrite the runner's own `resolv.conf`
 resolver, which errors out without `resolvconf` installed and breaks the runner resolving
 `github.com` if it doesn't.
 
-One consequence of the NAT: sshd sees the connection coming from the container's bridge address,
-not the peer's tunnel address. So a `from=` restriction in `authorized_keys` can't usefully name
-the runner, and the docker bridge needs to be in a firewalld zone that permits ssh. The forced
-command is doing the restricting here, not the source address.
+**Don't try to lock this down with `from=` in `authorized_keys`.** What source address sshd sees
+depends on which side of the box terminates the tunnel: a host-side `wg0` hands it the peer's
+tunnel address intact, while a bridged container MASQUERADEs and hands it the docker bridge
+address instead. Neither is a stable identity for a runner, and getting it wrong locks you out of
+your own deploy for reasons no log explains. The forced command is doing the restricting here, not
+the source address. (Whichever terminates it, the interface needs to be in a firewalld zone that
+permits ssh.)
 
-`Endpoint` is your public IP, the one place it appears. If it's dynamic, put a DDNS name there
-instead — WireGuard resolves an Endpoint hostname only at interface bring-up, which is a problem
-for long-lived peers and free for a runner that builds and destroys `wg0` every run.
+`Endpoint` is your public IP, the one place it appears — **and check its port against what the
+router actually forwards.** A containerised WireGuard server listens on 51820 inside the container
+and gets published on some other host port, and the generator writes *that* port into every peer
+config it hands out; if the router forwards the standard one to a server on the host, every
+generated config is pointing at a port nothing is listening on. This fails in the most expensive
+way available: `wg-quick up` still exits 0, every key is valid, and the packets are discarded
+upstream of any instance that could log them, so there is nothing to find on either end. If the IP
+is dynamic, put a DDNS name there — WireGuard resolves an Endpoint hostname only at interface
+bring-up, which is a problem for long-lived peers and free for a runner that builds and destroys
+`wg0` every run.
 
 **Environment secrets, not repo secrets** — Settings → Environments → `production`, matching
 `environment: production` in `deploy.yml`, with its deployment branch rule set to `main`. Repo
@@ -306,15 +318,19 @@ Three layers have to fail before a leaked secret matters: `WG_CONFIG` routes to 
 `SSH_KEY` is useless without it, and the forced command reduces that key to "restart the bot at a
 validated tag".
 
-Verify the tunnel half separately, from a phone or laptop peer already on the VPN:
-`ssh you@192.168.50.9`. If that works and the deploy still doesn't, the problem is the CI peer's
-config, not the firewall — which is worth knowing before you start editing zones.
+Verify the tunnel half separately, from a phone or laptop peer already on the VPN — and **do it off
+your LAN**, on cell data rather than the house wifi, or the connection never enters the tunnel and
+proves nothing. `ssh you@192.168.50.9`; any response is a pass, `Permission denied (publickey)`
+included, since it means packets made the round trip. If that works and the deploy still doesn't,
+the problem is the CI peer's config, not the firewall — worth knowing before you start editing
+zones.
 
-**Make the GHCR package public** (package → Package settings → Change visibility) and the host
-needs no registry credentials at all. It's created private by the first Publish run, so the
-first automatic deploy 401s on `docker compose pull` — flip the visibility, then
-**Actions → Deploy → Run workflow**. `docker login ghcr.io` with a `read:packages` PAT on the
-host is the alternative if the package should stay private.
+**The GHCR package has to be readable by the host**, and a public one needs no registry
+credentials there at all. Check it under package → Package settings → Change visibility after the
+first Publish run — not before, because a package doesn't exist to be configured until something
+has pushed to it. A private one shows up as a 401 on `docker compose pull` in the deploy log; flip
+the visibility and re-run, or keep it private and `docker login ghcr.io` on the host with a
+`read:packages` PAT.
 
 `docker-compose.yaml` and `deploy/host-deploy.sh` on the host are the two things CI never
 updates — a change to either needs a `git pull` there.
@@ -329,6 +345,7 @@ Not commitments — what's worth doing next, and what's already landed.
 |:---:|---|---|
 | ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and now the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing exists for `where:` and `timezone:` both — and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. |
 | ❌ | **Self-host Photon** | `where:` leans on a free shared instance that disclaims its own availability, and on 2026-08-12 it spent ~30s per query or 502'd — against a 2s budget, the same thing as being down. A local one answers in single-digit milliseconds, is throttled by nobody, and takes an external service out of a per-keystroke hot path. The code cost is nearly nothing: `ENDPOINT` in `src/places.ts` becomes an env var. Everything else is operational. Photon wants Java 21+ and a search index, and GraphHopper publishes weekly prebuilt dumps — planet is ~95GB and growing 10% a year, with smaller per-country sets alongside it. Disk is the easy part. The catch is the 64GB RAM it recommends at planet scale, which a 16GB box is not going to satisfy, so the version that fits here is a country dump with a capped heap: plausible, unproven, and worth testing before it's promised. Hosted Photon-compatible providers (Geoapify and friends) are the cheaper escape hatch and still ODbL, so the storage-permission reasoning above survives — but they need an account and a key, which is precisely the property that made Photon the pick. |
+| ✅ | **Deploy on merge** | Three workflows: CI on pull requests, a GHCR image on push to `main`, and a deploy that SSHes to the host and restarts it at the sha just built — so a dispatch with an older sha is the rollback, for free. The design cost was all in the last step, because the host is behind NAT with no public SSH address, so the runner joins the WireGuard tunnel as its own peer and reaches sshd through it. What made it expensive was that both of the real faults *succeeded* rather than failing. A forced command in `authorized_keys` runs the pinned command and leaves the client's string in `SSH_ORIGINAL_COMMAND`, so the heredoc that used to carry the remote body landed on stdin unread and `TAG` silently vanished — that's why the remote half is `deploy/host-deploy.sh`, checked into the repo, and why `DEPLOY_PATH` stopped being a secret. And `wg-quick up` configures an interface without handshaking, so it exits 0 into a tunnel that isn't there; the `ping` after it exists purely to make that fail out loud instead of surfacing as an SSH timeout half a job later. Both traps are now documented above, along with the two that only bit this host: a `wg0` on the host and one in a container sharing a keypair, and generated peer configs naming a port the router doesn't forward. The standing cost is that `docker-compose.yaml` and `host-deploy.sh` live on the host too, and CI never updates either. |
 | ✅ | **Looser `timezone:` input** | IANA names are impossible to guess, so the option is autocompleted from `Intl.supportedValuesOf('timeZone')` — no dependency, no list to maintain, and it tracks the runtime's own tzdata. Typed text resolves when it pins down one zone. The find was that strictness wasn't even buying correctness: ICU accepts `EST`, and `EST` is a fixed −5 with no daylight saving, so the old validator waved through the one input most likely to be an hour wrong. `DEFAULT_TZ` goes through the same resolver now, since it had the same hole. |
 | ✅ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and only one round-trip test enforced it. Nothing was lost to a build step in the end — Node strips types natively, so it still runs straight off the filesystem and the Dockerfile is still three lines; `typescript` is a devDependency that only ever type-checks. The cost is a Node 24 floor and `.ts` in every relative import. |
 | ✅ | **A `tryCatch` wrapper** | Fallible calls were guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a bare try/catch around the digest pin and the starter-message fetch. `src/utils/tryCatch.ts` returns `{ data, error }` and now covers all five, which also makes the exception visible: `handleAutocomplete` keeps its own try/catch because `getFocused(true)` throws *synchronously* and the helper only takes a promise. |
