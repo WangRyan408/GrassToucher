@@ -1,0 +1,50 @@
+# Build the image on every merge to main and push it to GHCR.
+#
+# `name:` is load-bearing: deploy.yml triggers on a completed workflow run *called Publish*.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+env:
+  # Spelled out in lowercase rather than built from ${{ github.repository }}: GHCR rejects the
+  # capitals in WangRyan408/GrassToucher, and a lowercasing shell step to save one constant
+  # would be worse than the constant.
+  IMAGE: ghcr.io/wangryan408/grasstoucher
+
+jobs:
+  # The gate. Tests failing means `needs: image` never resolves, so nothing reaches the
+  # registry — which is the whole reason the tests live in a callable workflow.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # What lets GITHUB_TOKEN push a package. No PAT involved.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          # `latest` is what the host follows; the sha tag is the rollback, and the only way
+          # to say "deploy exactly that commit" once latest has moved on.
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

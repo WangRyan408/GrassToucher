@@ -5,6 +5,7 @@ npm-debug.log
 .gitignore
 Dockerfile
 .dockerignore
-compose.yaml
+docker-compose.yaml
+deploy
 README.md
 test
