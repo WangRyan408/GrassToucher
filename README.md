@@ -88,6 +88,24 @@ Addresses are OpenStreetMap data — **© OpenStreetMap contributors**,
 an address in an embed forever: Google's and Mapbox's terms don't permit storing their
 geocoding results, which rules them out of a design where the post is the record.
 
+### When suggestions go quiet
+
+Photon's public instance is free and shared, and its terms promise nothing: *"please be fair —
+extensive usage will be throttled"*, and *"We do not guarantee for the availability."* On
+2026-08-12 it was taking **~30 seconds** to answer, or returning a 502 after a similar wait —
+reproducible with plain `curl`, so not the bot's doing.
+
+That looks like broken autofill, and nothing in here can fix it. An autocomplete interaction
+can't be deferred and dies at 3s, so `src/places.ts` budgets 2s for the whole round trip; a
+30-second upstream is indistinguishable from one that's down, and a longer timeout only moves the
+failure to Discord discarding a late reply. What you get is the designed fallback instead — an
+empty list, no error toast, and typed text still submits.
+
+Note also that this bot is a heavy client of that shared instance by construction: one request
+per keystroke from the third character on, so a typed-out address is thirty-odd of them. Worth
+holding in mind before reading "extensive usage will be throttled" as somebody else's problem —
+and the reason self-hosting Photon is on the Roadmap.
+
 ## Timezones
 
 `timezone:` suggests zones as you type, from whatever tzdata the runtime ships — no list to
@@ -193,28 +211,113 @@ Every image is tagged with its commit sha as well as `latest`, so a rollback is
 deploys the sha rather than `latest`, so `docker compose ps` on the host names the commit
 that's actually running.
 
-**Repo secrets** (Settings → Secrets and variables → Actions):
+The deploy sends one thing over the wire: the tag. `deploy/host-deploy.sh` is pinned as a forced
+command on the host's key, so the runner can't ask for a shell, a directory of its own choosing,
+or a script of its own — it names a tag and reads back the log. Anyone holding a leaked `SSH_KEY`
+gets the same narrow deal.
+
+### Reaching a host behind NAT
+
+A home server has no public address to SSH to, and port-forwarding 22 to get one means exposing
+sshd to the internet for the sake of a job that runs a few times a week. Instead the runner joins
+the WireGuard tunnel that's already there, as a peer of its own, and reaches sshd through it. Only
+WireGuard's UDP port is forwarded, and it already was.
+
+**`SSH_HOST` is the host's LAN address** (`192.168.50.9` in `deploy.yml`), not the WireGuard server
+address. If your WireGuard server runs in a bridged container — the usual `linuxserver/wireguard`
+setup — then `10.13.13.1` belongs to the *container*, which claims it as a local address and has no
+sshd on it, so aiming a deploy there gets connection refused and looks exactly like a firewall
+problem. The container NATs onto the LAN instead, which is the path every other peer already uses
+to reach services on the box. Check it with `docker exec wireguard ip route get 10.13.13.1`: if
+that says `local … dev lo`, the address is the container's and you want the LAN one.
+
+That peer's config is the `WG_CONFIG` secret, and it wants three edits over whatever your WireGuard
+server generates:
+
+```ini
+AllowedIPs = 192.168.50.9/32   # NOT the 10.13.13.0/24,192.168.50.0/24 it hands you
+PersistentKeepalive = 25
+# and delete the DNS = line entirely
+```
+
+`AllowedIPs` is the routing table for the tunnel, so the generated value points a CI runner at your
+whole LAN — every other box in the house, one leaked secret away. The deploy needs exactly one
+host. And a `DNS =` line makes `wg-quick` rewrite the runner's own `resolv.conf` to your LAN
+resolver, which errors out without `resolvconf` installed and breaks the runner resolving
+`github.com` if it doesn't.
+
+One consequence of the NAT: sshd sees the connection coming from the container's bridge address,
+not the peer's tunnel address. So a `from=` restriction in `authorized_keys` can't usefully name
+the runner, and the docker bridge needs to be in a firewalld zone that permits ssh. The forced
+command is doing the restricting here, not the source address.
+
+`Endpoint` is your public IP, the one place it appears. If it's dynamic, put a DDNS name there
+instead — WireGuard resolves an Endpoint hostname only at interface bring-up, which is a problem
+for long-lived peers and free for a runner that builds and destroys `wg0` every run.
+
+**Environment secrets, not repo secrets** — Settings → Environments → `production`, matching
+`environment: production` in `deploy.yml`, with its deployment branch rule set to `main`. Repo
+secrets are readable by `ci.yml` on any same-repo pull request; environment secrets only reach a job
+that names the environment, and `ci.yml` doesn't.
 
 | Secret | Value |
 |---|---|
-| `SSH_HOST` | Hostname or IP of the box running the bot |
+| `WG_CONFIG` | The tunnel peer config above |
 | `SSH_USER` | User to connect as — needs to be in the `docker` group |
-| `SSH_KEY` | Private half of a key whose public half is in that user's `authorized_keys` |
-| `SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -H your.host`, so the deploy pins the host's fingerprint instead of trusting whatever answers |
-| `DEPLOY_PATH` | Directory on the host holding this repo's `docker-compose.yaml` and its `.env` |
+| `SSH_KEY` | Private half of a key dedicated to this and nothing else — its public half goes in the host's `authorized_keys`, behind the forced command below |
+| `SSH_KNOWN_HOSTS` | One line pinning the host's key, so the deploy verifies a fingerprint instead of trusting whatever answers |
 
-**On the host**, once: clone the repo, write `.env` (see Setup), and
+No `SSH_HOST`: it's a literal in the workflow. An RFC1918 address only reachable through the tunnel
+hides nothing, and reading it in the diff beats an opaque secret when a deploy misbehaves.
+No `DEPLOY_PATH` either — the host script derives it from its own location, because a path the
+runner could name is a path the forced command isn't restricting.
+
+**On the host**, once — clone the repo, write `.env` (see Setup), then generate a key for this
+and nothing else:
 
 ```sh
-docker login ghcr.io -u YOUR_GITHUB_USER   # paste a PAT with read:packages
+ssh-keygen -t ed25519 -f ~/.ssh/gh_deploy -C deploy@github-actions -N ''
+printf 'command="%s/deploy/host-deploy.sh",restrict %s\n' \
+  "$PWD" "$(cat ~/.ssh/gh_deploy.pub)" >> ~/.ssh/authorized_keys
+cat ~/.ssh/gh_deploy        # this half goes in SSH_KEY, then delete it from the host
+
+# and this goes in SSH_KNOWN_HOSTS, verbatim
+printf '192.168.50.9 %s\n' "$(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
 ```
 
-The GHCR package is private until you say otherwise, so without that login
-`docker compose pull` answers 401 and the first deploy fails. Making the package public in its
-settings works too, and then the host needs no credentials at all.
+`known_hosts` matching is a literal string compare, so the entry must name the **exact string the
+workflow hands `ssh`** — the same address as `SSH_HOST`, whatever you set it to. Reading the host's
+own key file also beats `ssh-keyscan`, which asks the network who it is; there's no reason to when
+you're already standing on the machine. (`ssh-keyscan -H` is worse still here: it hashes the
+hostname, so it can only ever produce an entry for the name you scanned.)
 
-`docker-compose.yaml` on the host is the one thing CI never updates — a change to it needs a
-`git pull` there.
+`restrict` turns off pty, agent, port and X11 forwarding — none of which a deploy needs, all of
+which a stolen key would enjoy having.
+
+Verify the forced command before GitHub is ever involved, from the host itself:
+
+```sh
+ssh -i ~/.ssh/gh_deploy you@localhost latest              # deploys
+ssh -i ~/.ssh/gh_deploy you@localhost                     # same thing — not a shell
+ssh -i ~/.ssh/gh_deploy you@localhost 'rm -rf /tmp/x'     # exits 64, runs nothing
+```
+
+Three layers have to fail before a leaked secret matters: `WG_CONFIG` routes to one address,
+`SSH_KEY` is useless without it, and the forced command reduces that key to "restart the bot at a
+validated tag".
+
+Verify the tunnel half separately, from a phone or laptop peer already on the VPN:
+`ssh you@192.168.50.9`. If that works and the deploy still doesn't, the problem is the CI peer's
+config, not the firewall — which is worth knowing before you start editing zones.
+
+**Make the GHCR package public** (package → Package settings → Change visibility) and the host
+needs no registry credentials at all. It's created private by the first Publish run, so the
+first automatic deploy 401s on `docker compose pull` — flip the visibility, then
+**Actions → Deploy → Run workflow**. `docker login ghcr.io` with a `read:packages` PAT on the
+host is the alternative if the package should stay private.
+
+`docker-compose.yaml` and `deploy/host-deploy.sh` on the host are the two things CI never
+updates — a change to either needs a `git pull` there.
 
 ## Roadmap
 
@@ -225,6 +328,7 @@ Not commitments — what's worth doing next, and what's already landed.
 | Status | Change | Why, and what it costs |
 |:---:|---|---|
 | ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and now the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing exists for `where:` and `timezone:` both — and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. |
+| ❌ | **Self-host Photon** | `where:` leans on a free shared instance that disclaims its own availability, and on 2026-08-12 it spent ~30s per query or 502'd — against a 2s budget, the same thing as being down. A local one answers in single-digit milliseconds, is throttled by nobody, and takes an external service out of a per-keystroke hot path. The code cost is nearly nothing: `ENDPOINT` in `src/places.ts` becomes an env var. Everything else is operational. Photon wants Java 21+ and a search index, and GraphHopper publishes weekly prebuilt dumps — planet is ~95GB and growing 10% a year, with smaller per-country sets alongside it. Disk is the easy part. The catch is the 64GB RAM it recommends at planet scale, which a 16GB box is not going to satisfy, so the version that fits here is a country dump with a capped heap: plausible, unproven, and worth testing before it's promised. Hosted Photon-compatible providers (Geoapify and friends) are the cheaper escape hatch and still ODbL, so the storage-permission reasoning above survives — but they need an account and a key, which is precisely the property that made Photon the pick. |
 | ✅ | **Looser `timezone:` input** | IANA names are impossible to guess, so the option is autocompleted from `Intl.supportedValuesOf('timeZone')` — no dependency, no list to maintain, and it tracks the runtime's own tzdata. Typed text resolves when it pins down one zone. The find was that strictness wasn't even buying correctness: ICU accepts `EST`, and `EST` is a fixed −5 with no daylight saving, so the old validator waved through the one input most likely to be an hour wrong. `DEFAULT_TZ` goes through the same resolver now, since it had the same hole. |
 | ✅ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and only one round-trip test enforced it. Nothing was lost to a build step in the end — Node strips types natively, so it still runs straight off the filesystem and the Dockerfile is still three lines; `typescript` is a devDependency that only ever type-checks. The cost is a Node 24 floor and `.ts` in every relative import. |
 | ✅ | **A `tryCatch` wrapper** | Fallible calls were guarded ad hoc — `Promise.allSettled` for the DM fan-out, `.catch(() => {})` on the error reply, a bare try/catch around the digest pin and the starter-message fetch. `src/utils/tryCatch.ts` returns `{ data, error }` and now covers all five, which also makes the exception visible: `handleAutocomplete` keeps its own try/catch because `getFocused(true)` throws *synchronously* and the helper only takes a promise. |

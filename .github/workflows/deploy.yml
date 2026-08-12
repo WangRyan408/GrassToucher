@@ -31,13 +31,45 @@ jobs:
     runs-on: ubuntu-latest
     environment: production # Add required reviewers here if you ever want deploys gated.
     env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
+      # The host's LAN address, reached through the tunnel — see the tunnel step below. NOT
+      # 10.13.13.1: the WireGuard server runs in a bridged container that claims that address as
+      # its own (`ip route get 10.13.13.1` inside it says `local … dev lo`) and has no sshd, so a
+      # peer aiming there gets connection refused. The container MASQUERADEs onto the LAN instead,
+      # which is the same path every other peer already uses to reach services on this box.
+      #
+      # Deliberately a literal and not a secret: an RFC1918 address only reachable through the
+      # tunnel reveals nothing, and reading it here beats an opaque secret when a deploy misbehaves.
+      SSH_HOST: 192.168.50.9
       SSH_USER: ${{ secrets.SSH_USER }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       # The automatic path deploys the exact commit that was just built, not `latest`, so
       # `docker compose ps` on the host names the running commit.
       TAG: ${{ inputs.tag || github.event.workflow_run.head_sha }}
     steps:
+      # The host is behind NAT — there is no public address to SSH to, and the only port forwarded
+      # at the router is WireGuard's. So the runner joins the tunnel as a peer named `ci` and
+      # reaches sshd over it.
+      #
+      # WG_CONFIG's AllowedIPs is 192.168.50.9/32 and nothing else. The generated peer config
+      # offers the whole 192.168.50.0/24, which would put every other service in the house one
+      # leaked secret away.
+      - name: Join the tunnel
+        env:
+          WG_CONFIG: ${{ secrets.WG_CONFIG }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends wireguard-tools
+          # chmod rather than relying on umask: sudo resets it, and wg-quick warns about a
+          # world-readable private key.
+          printf '%s\n' "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+
+          # `wg-quick up` configures an interface; it never handshakes, so it exits 0 even when the
+          # far end is unreachable. WireGuard then retries in silence — no error, no ICMP — and the
+          # first thing to actually notice would be ssh timing out, which reads identically to a
+          # dead sshd or a wrong key. One ping makes the tunnel own its own failures.
+          ping -c1 -W5 "$SSH_HOST"
+
       # No actions/checkout: this workflow only opens an SSH connection.
       - name: Load the deploy key
         # Secrets arrive through `env`, never interpolated into the script body — a `${{ }}`
@@ -54,22 +86,23 @@ jobs:
           # answers on port 22, which is the one thing a private key must not do.
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
+      # The tag is the entire request. What runs on the other end is `deploy/host-deploy.sh`,
+      # pinned as a forced command on the host key, so this cannot ask for a shell, a different
+      # directory, or a script of its own choosing — see that file's header.
+      #
+      # BatchMode and StrictHostKeyChecking are belt and braces on top of the pinned
+      # known_hosts: a runner has no tty, and a prompt it can't answer should fail the job
+      # rather than hang until the six-hour timeout.
       - name: Pull and restart
         run: |
-          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" \
-            TAG="$TAG" DEPLOY_PATH="$DEPLOY_PATH" bash -euo pipefail -s <<'REMOTE'
-          cd "$DEPLOY_PATH"
-          docker compose pull
-          docker compose up -d --remove-orphans
-          # The bot reads its config and logs in at boot, so a bad token or a missing channel
-          # id crashes it seconds after a "successful" deploy. Catch that here instead of
-          # finding out when nobody can create an event.
-          sleep 8
-          if [ -z "$(docker compose ps --status running --quiet)" ]; then
-            echo "::error::Container is not running after deploy"
-            docker compose logs --tail=50
-            exit 1
-          fi
-          docker compose ps
-          docker image prune -f
-          REMOTE
+          ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$SSH_USER@$SSH_HOST" "$TAG"
+
+      # Runners are torn down after the job, so this is hygiene rather than necessity — but it runs
+      # on failure too, so a deploy that dies mid-SSH still leaves a clean log line about the
+      # tunnel going down instead of an interface nobody closed.
+      - name: Leave the tunnel
+        if: always()
+        run: sudo wg-quick down wg0 || true
