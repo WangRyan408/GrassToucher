@@ -41,17 +41,34 @@ bun-specific API. On a machine without bun, `npx vitest run` and `npx tsc --noEm
   hint as to why — the fix is the `command=` line, not anything in this repo.
 - **The deploy only works from inside the WireGuard tunnel.** The host is behind NAT with no
   public SSH address, so `SSH_HOST: 192.168.50.9` in `deploy.yml` is unreachable until the runner
-  brings up `wg0` from `WG_CONFIG`. Three things about that, each of which has already cost time:
-  - **It is the LAN address, not `10.13.13.1`.** The WireGuard server is a *bridged* container, so
-    it owns `10.13.13.1` itself — `docker exec wireguard ip route get 10.13.13.1` says
-    `local … dev lo` — and runs no sshd. Aiming a deploy there gets connection refused and reads
-    exactly like a firewall problem. The container MASQUERADEs onto the LAN instead. (Confusingly
-    the *host* also has a `wg0` holding `10.13.13.1`, with its own socket on 51820; the router
-    forwards 51821, which Docker publishes to the container, so peers land in the container. The
-    LAN address is correct either way, which is why it's the one to use.)
+  brings up `wg0` from `WG_CONFIG`. Five things about that, each of which has already cost time:
+  - **Two WireGuard servers run on this host, sharing one keypair.** The live one is the *host's*
+    `wg0`, owned by NetworkManager —
+    `/etc/NetworkManager/system-connections/wg0.nmconnection`, autoconnect on. That is why it
+    survives reboots with no `/etc/wireguard/wg0.conf` and `wg-quick@wg0` disabled, and checking
+    those two paths is not enough to conclude anything. It was imported from the container's config
+    on 2026-01-09 and is a frozen copy: same private key, and the peer list *of that date*. The
+    linuxserver container still runs its own `wg0` from the same keypair, but nothing routes to it —
+    `docker exec wireguard wg show` has never recorded a handshake. `nmcli device status` and
+    `ip route show dev wg0` both answer this without root.
+  - **The router forwards UDP 51820, and the generated peer configs are wrong about it.** The
+    container publishes `51820/udp -> 51821`, so linuxserver writes `Endpoint = <wan>:51821` into
+    every peer config it generates, and nothing forwards 51821. A peer that trusts the generated
+    file gets precisely the symptom below — `wg-quick up` succeeds, then silence, with every key
+    verifiably correct.
+  - **Adding a peer to the container does nothing.** `WIREGUARD_PEERS` regenerates the container's
+    `wg0.conf`, which the live server never reads. A new peer has to go into the NM profile (a
+    `[wireguard-peer.<pubkey>]` section with `preshared-key-flags=0`, then
+    `nmcli connection reload`) *and* into the running interface (`wg set wg0 peer … allowed-ips …`,
+    plus the `ip route` that NM's `peer-routes=yes` would add for you on activation). `wg syncconf`
+    looks like the one-step version and is the wrong tool — it re-applies every peer from the file
+    and can break live sessions whose secrets the container has since regenerated.
   - `wg-quick up` **exits 0 even when the far end is unreachable** — it configures an interface, it
-    never handshakes. That's why a `ping` follows it; delete that ping and every tunnel fault
-    becomes an indistinguishable SSH timeout.
+    never handshakes. That's why the tunnel step pings, and why it then prints `wg show`: *no
+    handshake* means the packets never reached a server that could authenticate them, so suspect
+    the forward or the endpoint and not the keys, while *a handshake and no ping reply* is routing
+    or firewall on the host. Without that split, every tunnel fault is an indistinguishable SSH
+    timeout.
   - `Endpoint` in `WG_CONFIG` is a literal public IP. When the ISP moves it, deploys fail at the
     ping and the fix is the secret, not the repo.
 
