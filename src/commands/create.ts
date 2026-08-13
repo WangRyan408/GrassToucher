@@ -7,7 +7,7 @@
 import { MessageFlags, ThreadAutoArchiveDuration, TimestampStyles, time } from 'discord.js';
 import type { ChatInputCommandInteraction, SlashCommandSubcommandBuilder } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
-import { rsvpRow, toEmbed } from '../event.ts';
+import { rsvpRow, threadName, toEmbed } from '../event.ts';
 import { formatWhen } from '../time.ts';
 import type { Ctx } from '../types/config.ts';
 import type { Event } from '../types/event.ts';
@@ -80,7 +80,7 @@ export async function handleCreate(interaction: ChatInputCommandInteraction, ctx
   };
 
   const thread = await ctx.forum.threads.create({
-    name: event.title.slice(0, 100),
+    name: threadName(event),
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     message: { embeds: [toEmbed(event)], components: [rsvpRow()] },
   });

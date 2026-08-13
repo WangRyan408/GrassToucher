@@ -60,19 +60,56 @@ export function rsvpRow(): ActionRowBuilder<ButtonBuilder> {
 const mentions = (ids: string[]) => (ids.length ? ids.map((id) => `<@${id}>`).join(' ') : '—');
 const readIds = (value: string) => [...value.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]);
 
+type EventStatus = 'upcoming' | 'past' | 'cancelled';
+
 /**
- * The one place the embed colour is decided, so the sweep can ask "does this need a
- * re-render?" without duplicating the rule and looping forever when it guesses wrong.
+ * The one place event state is decided, so the sweep can ask "does this need a re-render?"
+ * without duplicating the rule and looping forever when it guesses wrong.
  */
-export function embedColor(event: Event): number {
-  if (event.cancelled) return COLOR_CANCELLED; // Outranks past-grey.
-  return new Date(event.startsAt).getTime() < Date.now() ? COLOR_PAST : COLOR_UPCOMING;
+function eventStatus(event: Event): EventStatus {
+  if (event.cancelled) return 'cancelled'; // Outranks past-grey.
+  return new Date(event.startsAt).getTime() < Date.now() ? 'past' : 'upcoming';
 }
+
+/**
+ * Typed as a full Record, so a new status can't be added without deciding how it reads.
+ *
+ * The colour and the dot are paired here rather than derived apart, because they answer the
+ * same question in two places a reader sees at once — a post whose name says it's over while
+ * its embed is still green is worse than either signal alone.
+ */
+export const STATUS: Record<EventStatus, { color: number; dot: string }> = {
+  upcoming: { color: COLOR_UPCOMING, dot: '🟢' },
+  past: { color: COLOR_PAST, dot: '⚫' },
+  cancelled: { color: COLOR_CANCELLED, dot: '🔴' },
+};
+
+export const embedColor = (event: Event): number => STATUS[eventStatus(event)].color;
+
+/** Discord's cap on a thread name. Was spelled out at all three rename sites. */
+const THREAD_NAME_CAP = 100;
 
 /** Title as shown in the embed and thread name. Truncates the title, never the marker. */
 export function displayTitle(event: Event, cap: number): string {
   if (!event.cancelled) return event.title.slice(0, cap);
   return event.title.slice(0, cap - CANCELLED_SUFFIX.length) + CANCELLED_SUFFIX;
+}
+
+/**
+ * Name as shown on the forum post: a status dot, then the title. Discord renders a thread
+ * name in one fixed colour and offers no way to style it, so an emoji is the only thing that
+ * can carry status up into the channel list.
+ *
+ * Presentation only, like the CANCELLED marker — but unlike it, the dot never needs undoing,
+ * because nothing reads an event back out of a thread name. `fromEmbed` parses the *embed*
+ * title, which stays clean.
+ *
+ * Budgeted off `prefix.length` rather than a fixed 2: 🟢 and 🔴 are astral and cost two UTF-16
+ * units, ⚫ is one, so a hardcoded allowance would truncate one state and overrun another.
+ */
+export function threadName(event: Event): string {
+  const prefix = `${STATUS[eventStatus(event)].dot} `;
+  return prefix + displayTitle(event, THREAD_NAME_CAP - prefix.length);
 }
 
 /**
