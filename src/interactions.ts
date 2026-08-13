@@ -14,8 +14,9 @@ import { ephemeral } from './commands/shared.ts';
 import { rebuildDigest } from './digest.ts';
 import { CHOICES, applyRsvp, ensureOpen, fromEmbed, isOurs, rsvpRow, toEmbed } from './event.ts';
 import { searchPlaces } from './places.ts';
-import { searchTimeZones } from './time.ts';
-import type { Ctx, RsvpChoice } from './types.ts';
+import { resolveTimeZone, searchTimeZones, searchWhen } from './time.ts';
+import type { Ctx } from './types/config.ts';
+import type { RsvpChoice } from './types/event.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 export const commands = [
@@ -69,10 +70,10 @@ async function handleRsvp(interaction: ButtonInteraction, ctx: Ctx) {
 }
 
 /**
- * Suggest addresses while someone types `where:`, and zones while they type `timezone:`.
+ * Suggest times while someone types `when:`, addresses for `where:`, and zones for `timezone:`.
  *
- * Routed on the option name, not the subcommand: create and edit spell these two identically,
- * and one dispatch here beats the same pair of branches in both command files.
+ * Routed on the option name, not the subcommand: create and edit spell all three identically,
+ * and one dispatch here beats the same branches in both command files.
  *
  * Owns its error handling, unlike every other handler here: an autocomplete interaction is
  * not repliable, so index.ts's catch-all can't answer one, and an unanswered interaction
@@ -87,6 +88,15 @@ async function handleAutocomplete(interaction: AutocompleteInteraction, ctx: Ctx
     if (focused.name === 'timezone') {
       // No await on the search itself: the zone list is in-process.
       return interaction.respond(searchTimeZones(focused.value, ctx.config.defaultTz));
+    }
+    if (focused.name === 'when') {
+      // Half-typed sibling options come through on an autocomplete interaction, so a zone already
+      // chosen renders the preview in it. Filled the other way round, `when:` first and
+      // `timezone:` after, the choice's stored wall clock still means what it says — only the
+      // preview was drawn in the default zone, which is why the label names the zone it used.
+      const requested = interaction.options.getString('timezone')?.trim();
+      const tz = (requested && resolveTimeZone(requested)) || ctx.config.defaultTz;
+      return interaction.respond(searchWhen(focused.value, tz));
     }
     if (focused.name !== 'where') return interaction.respond([]);
     await interaction.respond(await searchPlaces(focused.value, ctx.config.placeBias));

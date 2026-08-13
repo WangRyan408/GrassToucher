@@ -8,7 +8,8 @@
  * Nominatim is not an option here — its usage policy lists auto-complete under
  * "Unacceptable Use".
  */
-import type { Choice } from './types.ts';
+import type { Choice } from './types/autocomplete.ts';
+import type { PhotonProperties } from './types/places.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 const ENDPOINT = 'https://photon.komoot.io/api/';
@@ -23,19 +24,6 @@ const TIMEOUT_MS = 2000;
 const CHOICE_CAP = 100;
 
 const UA = 'GrassToucher (Discord event bot; https://github.com/WangRyan408/GrassToucher)';
-
-/**
- * The five keys we read off a Photon feature. It sends a dozen more (country, postcode,
- * osm_*, extent), hence the index signature — they're ignored, not rejected.
- */
-export interface PhotonProperties {
-  name?: string;
-  housenumber?: string;
-  street?: string;
-  city?: string;
-  state?: string;
-  [key: string]: unknown;
-}
 
 /**
  * Photon GeoJSON properties → one human-readable line.

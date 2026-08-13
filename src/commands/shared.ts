@@ -9,8 +9,9 @@
 import { MessageFlags, PermissionFlagsBits } from 'discord.js';
 import type { ButtonInteraction, ChatInputCommandInteraction } from 'discord.js';
 import { readEvent } from '../event.ts';
-import { TIME_FORMAT, resolveTimeZone, searchTimeZones, zonedToDate } from '../time.ts';
-import type { Ctx, EventEntry } from '../types.ts';
+import { TIME_FORMAT, parseWhenInput, resolveTimeZone, searchTimeZones } from '../time.ts';
+import type { Ctx } from '../types/config.ts';
+import type { EventEntry } from '../types/event.ts';
 
 // `as const` pins the flag to the one enum member: without it the type widens to the whole
 // MessageFlags enum, and reply() only accepts the handful of flags it can actually set.
@@ -45,9 +46,9 @@ export function parseWhen(
       ? `\`${requested}\` matches more than one timezone. Did you mean ${near}? Pick one from the list as you type.`
       : `\`${requested}\` isn't a timezone I recognise. Try a city like \`Berlin\` and pick from the list as you type.`;
   }
-  const startsAt = zonedToDate(raw, tz);
+  const startsAt = parseWhenInput(raw, tz);
   if (!startsAt) {
-    return `Couldn't read \`${raw}\` as a time. Use \`${TIME_FORMAT}\` on a 24-hour clock, e.g. \`2026-08-15 19:30\`. (A time skipped by a daylight-saving jump won't work either.)`;
+    return `Couldn't read \`${raw}\` as a time. Try \`tomorrow 7pm\`, \`Friday 7:30 PM\` or \`Aug 15 7pm\`, and pick from the list as you type. (\`${TIME_FORMAT}\` still works; a time skipped by a daylight-saving jump won't, whichever way you write it.)`;
   }
   return { startsAt, tz };
 }

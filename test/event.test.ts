@@ -11,7 +11,7 @@ import {
   notifyRecipients,
   toEmbed,
 } from '../src/event.ts';
-import type { Event } from '../src/types.ts';
+import type { Event } from '../src/types/event.ts';
 
 /** Annotated `Event`, so the fixture is checked against the real record, not just itself. */
 const sample = (over: Partial<Event> = {}): Event => ({

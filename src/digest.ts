@@ -1,7 +1,8 @@
 import { EmbedBuilder, TimestampStyles, time } from 'discord.js';
 import type { GuildTextBasedChannel, Message } from 'discord.js';
 import { CHOICES, COLOR_UPCOMING, MARKER, listEvents } from './event.ts';
-import type { Ctx, EventEntry } from './types.ts';
+import type { Ctx } from './types/config.ts';
+import type { EventEntry } from './types/event.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 /** ponytail: one embed holds 4096 description chars. Past ~25 events, paginate or split. */
