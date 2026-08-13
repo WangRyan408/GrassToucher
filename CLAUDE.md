@@ -4,8 +4,12 @@ Claude Code loads this file automatically at the start of every session in this 
 why it's named `CLAUDE.md` rather than something like `HANDOFF.md`.
 
 **Read `README.md` first.** It is accurate, current, and explains the design — Discord as the
-database, the embed⇄event codec, `where:`/`timezone:` autocomplete, the deploy pipeline. This
-file only covers what isn't in there.
+database, the embed⇄event codec, `where:`/`timezone:` autocomplete, the deploy pipeline. The
+host-specific half of that pipeline — the CI runner's WireGuard peer, the secrets, the forced
+command — is in `docs/deploy-home-server.md`. This file only covers what isn't in either.
+
+The WireGuard notes below are deliberately *not* in those two: they describe this host's own
+server (two of them, sharing a keypair), where the docs file describes the runner's peer.
 
 ## Commands
 
