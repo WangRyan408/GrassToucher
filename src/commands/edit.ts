@@ -7,7 +7,7 @@
 import { MessageFlags, TimestampStyles, escapeMarkdown, time } from 'discord.js';
 import type { ChatInputCommandInteraction, SlashCommandSubcommandBuilder } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
-import { displayTitle, ensureOpen, notifyRecipients, rsvpRow, toEmbed } from '../event.ts';
+import { ensureOpen, notifyRecipients, rsvpRow, threadName, toEmbed } from '../event.ts';
 import type { Ctx } from '../types/config.ts';
 import { cancelledBanner, deliveryNotes, notifyAttendees } from './cancel.ts';
 import { content, ephemeral, parseWhen, resolveEvent } from './shared.ts';
@@ -79,9 +79,9 @@ export async function handleEdit(interaction: ChatInputCommandInteraction, ctx: 
     embeds: [toEmbed(event)],
     components: event.cancelled ? [] : [rsvpRow()],
   });
-  // Rename on any drift, not just a new title: un-cancelling has to take the marker off
-  // the post name too, and nothing else moves this name.
-  const name = displayTitle(event, 100);
+  // Rename on any drift, not just a new title: un-cancelling has to take the marker off the
+  // post name and turn the dot back to green, and a new `when:` can move the dot on its own.
+  const name = threadName(event);
   if (thread.name !== name) await thread.setName(name);
   await rebuildDigest(ctx);
 

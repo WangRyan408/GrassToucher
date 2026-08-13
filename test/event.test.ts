@@ -4,14 +4,24 @@ import {
   COLOR_CANCELLED,
   COLOR_UPCOMING,
   MAX_PER_LIST,
+  STATUS,
   applyRsvp,
   displayTitle,
   embedColor,
   fromEmbed,
   notifyRecipients,
+  threadName,
   toEmbed,
 } from '../src/event.ts';
 import type { Event } from '../src/types/event.ts';
+
+/**
+ * Spelled out rather than leaning on the fixture's own date: status is decided against
+ * `Date.now()`, so a test that assumed `sample()` was upcoming would start failing on its
+ * start date and read as a code regression.
+ */
+const FUTURE = new Date('2999-01-01T00:00:00.000Z');
+const PAST = new Date('2020-01-01T00:00:00.000Z');
 
 /** Annotated `Event`, so the fixture is checked against the real record, not just itself. */
 const sample = (over: Partial<Event> = {}): Event => ({
@@ -101,6 +111,54 @@ test('displayTitle truncates the title, never the marker', () => {
 
   expect(shown.length).toBe(100);
   expect(shown.endsWith(CANCELLED_SUFFIX), shown).toBe(true);
+});
+
+test('the post name carries a status dot, and the colour agrees with it', () => {
+  const states = [
+    ['upcoming', sample({ startsAt: FUTURE })],
+    ['past', sample({ startsAt: PAST })],
+    // Past *and* cancelled, so this also pins the precedence: red, not grey.
+    ['cancelled', sample({ startsAt: PAST, cancelled: true })],
+  ] as const;
+
+  for (const [status, event] of states) {
+    // The dot and the colour are one fact drawn twice, and the sweep's drift check assumes
+    // they can't disagree — a post that says "over" in the channel list while its embed is
+    // still green is the exact failure this pairing exists to prevent.
+    expect(threadName(event).startsWith(STATUS[status].dot), threadName(event)).toBe(true);
+    expect(embedColor(event), status).toBe(STATUS[status].color);
+  }
+
+  const dots = states.map(([status]) => STATUS[status].dot);
+  expect(new Set(dots).size, dots.join(' ')).toBe(dots.length);
+});
+
+test('the post name truncates the title, never the dot or the marker', () => {
+  const long = 'g'.repeat(200);
+
+  for (const [status, startsAt, cancelled] of [
+    ['upcoming', FUTURE, false],
+    ['past', PAST, false],
+    ['cancelled', PAST, true],
+  ] as const) {
+    const name = threadName(sample({ title: long, startsAt, cancelled }));
+
+    // Discord rejects a thread name over 100. 🟢 and 🔴 are astral and cost two UTF-16 units
+    // where ⚫ costs one, so a fixed allowance would overrun on exactly two of these three.
+    expect(name.length, `${status} was ${name.length}: ${name}`).toBeLessThanOrEqual(100);
+    expect(name.startsWith(STATUS[status].dot), name).toBe(true);
+    if (cancelled) expect(name.endsWith(CANCELLED_SUFFIX), name).toBe(true);
+  }
+});
+
+test('the status dot stays out of the embed, so it never reaches the record', () => {
+  const event = sample({ startsAt: PAST });
+
+  // The dot needs no undoing in `fromEmbed` precisely because it never gets written there —
+  // if that ever stops holding, every re-render stacks another dot onto the stored title.
+  expect(threadName(event).startsWith(STATUS.past.dot)).toBe(true);
+  expect(toEmbed(event).toJSON().title).toBe('Touch Grass');
+  expect(roundTrip(event)).toStrictEqual(event);
 });
 
 test('notifies everyone who might turn up, except whoever changed the plan', () => {

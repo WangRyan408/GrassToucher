@@ -24,7 +24,7 @@ import type {
   User,
 } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
-import { displayTitle, ensureOpen, notifyRecipients, toEmbed } from '../event.ts';
+import { ensureOpen, notifyRecipients, threadName, toEmbed } from '../event.ts';
 import type { Ctx } from '../types/config.ts';
 import type { Event } from '../types/event.ts';
 import { tryCatch } from '../utils/tryCatch.ts';
@@ -138,7 +138,7 @@ export async function handleCancelConfirm(interaction: ButtonInteraction, ctx: C
   });
   // ponytail: Discord allows 2 channel renames per 10 min. discord.js waits it out, so a
   // rapid edit-edit-cancel just takes longer — we're already deferred.
-  await thread.setName(displayTitle(cancelled, 100));
+  await thread.setName(threadName(cancelled));
 
   const delivery = await notifyAttendees(ctx, cancelled, interaction.user, thread, recipients);
   await rebuildDigest(ctx);
