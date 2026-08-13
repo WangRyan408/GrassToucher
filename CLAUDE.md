@@ -34,8 +34,12 @@ after it fires anyway. Check `${PIPESTATUS[0]}`, or don't pipe.
 - **Relative imports name `.ts` files.** Specifiers resolve literally; nothing rewrites
   `./event.js`. `tsconfig.json` sets `erasableSyntaxOnly`, so no enums, namespaces, parameter
   properties, or decorators — type stripping can't generate the code they need.
-- **`src/index.ts` logs the client in at import time.** Never import a value from it; that's
-  why shared types live in `src/types.ts`.
+- **`src/index.ts` logs the client in at import time.** Never import a value from it; that's why
+  `Config` and `Ctx` live in `src/types/config.ts` rather than beside the code that builds them.
+  The rule for that directory: any type another module could import lives in `src/types/`, one
+  file per concern. A type with exactly one consumer deliberately stays next to it — `ChoiceMeta`
+  in `event.ts`, `Parts` in `time.ts`, `Result` in `utils/tryCatch.ts` — so moving those is not
+  "finishing the job".
 - The image name is spelled out lowercase in **two** places — `IMAGE` in
   `.github/workflows/publish.yml` and `image:` in `docker-compose.yaml`. GHCR rejects the
   capitals in `WangRyan408/GrassToucher`, so a repo rename means editing both.

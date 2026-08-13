@@ -4,12 +4,11 @@
  * The cancellation helpers come from `./cancel.ts`: `uncancel:` undoes what that file did, and
  * has to render the banner and word the DM identically or the two flows drift.
  */
-import { MessageFlags, escapeMarkdown } from 'discord.js';
+import { MessageFlags, TimestampStyles, escapeMarkdown, time } from 'discord.js';
 import type { ChatInputCommandInteraction, SlashCommandSubcommandBuilder } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
 import { displayTitle, ensureOpen, notifyRecipients, rsvpRow, toEmbed } from '../event.ts';
-import { TIME_FORMAT } from '../time.ts';
-import type { Ctx } from '../types.ts';
+import type { Ctx } from '../types/config.ts';
 import { cancelledBanner, deliveryNotes, notifyAttendees } from './cancel.ts';
 import { content, ephemeral, parseWhen, resolveEvent } from './shared.ts';
 
@@ -18,7 +17,12 @@ export const editSubcommand = (sub: SlashCommandSubcommandBuilder) =>
     .setName('edit')
     .setDescription("Edit this event (run inside the event's thread)")
     .addStringOption((o) => o.setName('title').setDescription('New name').setMaxLength(100))
-    .addStringOption((o) => o.setName('when').setDescription(`New start time, ${TIME_FORMAT}`))
+    .addStringOption((o) =>
+      o
+        .setName('when')
+        .setDescription('New start time — try "friday 7pm" or "Aug 15 7:30 PM"')
+        .setAutocomplete(true),
+    )
     .addStringOption((o) =>
       o
         .setName('where')
@@ -81,7 +85,19 @@ export async function handleEdit(interaction: ChatInputCommandInteraction, ctx: 
   if (thread.name !== name) await thread.setName(name);
   await rebuildDigest(ctx);
 
-  if (!uncancel) return interaction.editReply(content('Updated.'));
+  if (!uncancel) {
+    // Only when the time moved: the same per-viewer echo create does, for the same reason — this
+    // is the one command that can silently reschedule an event into the wrong zone. Left off the
+    // other fields, where a timestamp nobody changed reads as if something had.
+    return interaction.editReply(
+      content(
+        when
+          ? `Updated — now starts ${time(event.startsAt, TimestampStyles.FullDateShortTime)} ` +
+            `(${time(event.startsAt, TimestampStyles.RelativeTime)}).`
+          : 'Updated.',
+      ),
+    );
+  }
 
   // Those people were told it was off. Leaving that DM standing is worse than one more.
   const delivery = await notifyAttendees(

@@ -25,7 +25,8 @@ import type {
 } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
 import { displayTitle, ensureOpen, notifyRecipients, toEmbed } from '../event.ts';
-import type { Ctx, Event } from '../types.ts';
+import type { Ctx } from '../types/config.ts';
+import type { Event } from '../types/event.ts';
 import { tryCatch } from '../utils/tryCatch.ts';
 import { ephemeral, resolveEvent } from './shared.ts';
 

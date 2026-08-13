@@ -11,7 +11,7 @@ import { rebuildDigest } from './digest.ts';
 import { embedColor, ensureOpen, toEmbed } from './event.ts';
 import { commands, route } from './interactions.ts';
 import { resolveTimeZone } from './time.ts';
-import type { Config, Ctx } from './types.ts';
+import type { Config, Ctx } from './types/config.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 // Keep REMINDER_MINUTES comfortably above this, or a sweep can step over the window

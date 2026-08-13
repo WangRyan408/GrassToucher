@@ -58,12 +58,60 @@ there's no deploy step.
 
 | Command | Notes |
 |---|---|
-| `/event create title: when: [where:] [description:] [timezone:]` | `when` is `YYYY-MM-DD HH:MM` on a 24-hour clock. `timezone` suggests zones as you type — a city (`Berlin`), an abbreviation (`PST`) or a full IANA name all work, and it defaults to `DEFAULT_TZ`. |
+| `/event create title: when: [where:] [description:] [timezone:]` | `when` takes what you'd say out loud — `tomorrow 7pm`, `Friday 7:30 PM`, `Aug 15 7pm`, `in 2 hours` — and suggests the resolved time as you type. `timezone` suggests zones as you type — a city (`Berlin`), an abbreviation (`PST`) or a full IANA name all work, and it defaults to `DEFAULT_TZ`. |
 | `/event edit [title:] [when:] [where:] [description:] [timezone:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
 | `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
 
 Times are stored as an instant and rendered with Discord's own timestamp markup, so
 everyone reads them in their own local timezone.
+
+## Times
+
+`when:` reads what you'd say out loud. `tomorrow 7pm`, `friday 7:30 PM`, `Aug 15 7pm`,
+`in 2 hours`, `next saturday`, `7:30` on its own. The old `YYYY-MM-DD HH:MM` still works and is
+still what gets submitted under the hood, so nothing that used to parse has stopped.
+
+The dropdown echoes the resolved time back **before** you submit, on a 12-hour clock and named
+with the timezone it used — `Sat, Aug 15, 2026 · 7:30 PM PDT · in 3 days`. That preview is what
+makes loose parsing safe rather than surprising: you see which Friday it picked while you can
+still fix it. Picking a suggestion submits the canonical form, so the text and the instant can't
+disagree. Focus the option before typing anything and it offers this evening, tomorrow, and a
+few points out to a week away — the evening ones quietly dropping off as the evening goes on,
+since nothing already past is ever suggested.
+
+Two things it deliberately won't guess:
+
+- **An unwritten AM/PM is offered both ways.** `7:30` lists 7:30 PM *and* 7:30 AM, soonest
+  first, because silently picking one is how somebody ends up at a 7 AM party.
+- **A date with no clock time means midnight, and says so.** `Aug 15` lists `12:00 AM` first —
+  the behavior it always had, now visible — then noon and the usual evening times on that date.
+  The one rough edge is that `tonight` is a date, not a time: it resolves to midnight, which by
+  the evening is behind you, so submitting it bare gets the "already passed" complaint. The
+  dropdown filters that midnight out and offers the later hours on that day instead.
+
+Anything it can't read gets the same fallback as `where:` — an empty list, no error toast, and
+typed text still submits to a reply naming what to try. A time that daylight saving skips is
+rejected whichever way you write it, since the loose parser hands its wall clock to the same
+strict converter (see below).
+
+`timezone:` sets which zone that wall clock is read in; the two options talk to each other, so
+setting `timezone: Tokyo` first re-renders the `when:` previews in Tokyo.
+
+Bot-written text is 12-hour. The **embeds are not forced either way** — they use Discord's
+`<t:…>` markup, which each viewer's client renders in their own locale and zone. Hardcoding
+12-hour there would override a reader who prefers 24-hour and cost the per-viewer timezone
+rendering that makes the markup worth using in the first place.
+
+That same markup is how the confirmations close the loop on the one thing the bot genuinely
+cannot know. **Discord tells a bot nothing about a user's timezone** — there is no field on the
+user or member object, no OAuth scope among the 28 that exist, and no intent to enable; the
+closest thing sent is `locale`, which is a *language*. So `/event create` and `/event edit` echo
+the resolved instant back as `<t:…>`, rendered by the organizer's own client in their own zone.
+If you typed `7pm` while `DEFAULT_TZ` sat three zones west of you, the confirmation says 10:00 PM
+and you catch it immediately. The autocomplete preview can't do this — choice names are plain
+strings and markup doesn't render there, which is why `formatWhen` names its zone instead. The
+"that's already passed" reply deliberately shows both: the zone the bot parsed in, and your own
+clock. When those two disagree, the disagreement is the diagnosis.
 
 ## Locations
 
@@ -170,8 +218,8 @@ bun-specific API, and Node 24 strips types too — but the dependency versions a
 format only bun reads.
 
 `src/` is the bot, `test/` mirrors it — `test/event.test.ts` covers `src/event.ts`, and so on.
-Only three files have logic worth testing: timezone conversion, the embed⇄event codec, and
-address formatting. Everything else is Discord I/O. The suite makes no network calls.
+Only three files have logic worth testing: time parsing and timezone conversion, the embed⇄event
+codec, and address formatting. Everything else is Discord I/O. The suite makes no network calls.
 
 | File | Job |
 |---|---|
@@ -182,8 +230,8 @@ address formatting. Everything else is Discord I/O. The suite makes no network c
 | `src/commands/create.ts` · `edit.ts` · `cancel.ts` | One file per subcommand: its slice of the `/event` definition next to the handler that serves it. `cancel.ts` also owns the confirm button and the cancel/reinstate DMs |
 | `src/commands/shared.ts` | What more than one subcommand needs: reply shapes, `when:`/`timezone:` parsing, the organizer-or-mod guard |
 | `src/places.ts` | Address lookup for `where:` — Photon adapter and label formatting |
-| `src/time.ts` | `YYYY-MM-DD HH:MM` + IANA zone → instant, DST-correct |
-| `src/types.ts` | The shapes that cross module boundaries: `Event`, `Config`, `Ctx` |
+| `src/time.ts` | Wall clock + IANA zone → instant, DST-correct. Also the loose `when:` parser, its suggestions, and the one place a 12-hour string is built |
+| `src/types/` | The shapes that cross module boundaries, one file per concern — `event.ts` (`Event`, `EventEntry`, `Rsvp`), `config.ts` (`Config`, `Ctx`), `autocomplete.ts`, `places.ts`. Declarations only, so the whole directory erases at compile time. A type with one consumer stays next to it instead |
 | `src/utils/tryCatch.ts` | `await tryCatch(promise)` → `{ data, error }`, for calls allowed to fail |
 
 ### If embeds come back empty
@@ -343,8 +391,8 @@ Not commitments — what's worth doing next, and what's already landed.
 
 | Status | Change | Why, and what it costs |
 |:---:|---|---|
-| ❌ | **Looser `when:` input** | `YYYY-MM-DD HH:MM` is the only accepted format and now the most-rejected input in the bot. `tomorrow 7pm`, `friday 19:30`, `in 2 hours` should all parse. Autocomplete is the right surface — the plumbing exists for `where:` and `timezone:` both — and echoing the resolved date back *before* submit is what makes fuzzy parsing safe rather than surprising. |
 | ❌ | **Self-host Photon** | `where:` leans on a free shared instance that disclaims its own availability, and on 2026-08-12 it spent ~30s per query or 502'd — against a 2s budget, the same thing as being down. A local one answers in single-digit milliseconds, is throttled by nobody, and takes an external service out of a per-keystroke hot path. The code cost is nearly nothing: `ENDPOINT` in `src/places.ts` becomes an env var. Everything else is operational. Photon wants Java 21+ and a search index, and GraphHopper publishes weekly prebuilt dumps — planet is ~95GB and growing 10% a year, with smaller per-country sets alongside it. Disk is the easy part. The catch is the 64GB RAM it recommends at planet scale, which a 16GB box is not going to satisfy, so the version that fits here is a country dump with a capped heap: plausible, unproven, and worth testing before it's promised. Hosted Photon-compatible providers (Geoapify and friends) are the cheaper escape hatch and still ODbL, so the storage-permission reasoning above survives — but they need an account and a key, which is precisely the property that made Photon the pick. |
+| ✅ | **Looser `when:` input** | `tomorrow 7pm`, `friday 7:30 PM` and `in 2 hours` all parse now, via `chrono-node`, and the autocomplete echoes the resolved instant back before submit — which is the half that matters, because a parser that guesses without showing its work just relocates the mistake to after the post exists. Two affordances came out of using it: an unwritten AM/PM is offered both ways rather than picked, and a bare date lists `12:00 AM` first so the midnight it always meant is visible instead of silent. The cost is the first runtime dependency past discord.js — 2.76 MB across 1,643 files, though with zero transitive deps of its own, and the English locale imported alone. The find that shaped the code: **chrono's own `Date` is the wrong output.** It resolves against a single fixed offset, so a November date parsed in August comes out an hour off — precisely what `zonedToDate` was written to get right. So the bridge reads the wall-clock *components* off the parse and hands them to `zonedToDate`, which keeps one DST-correct conversion in the repo and inherits its refusal of daylight-saving-gap times for free. That's the regression test in `test/time.test.ts`, and it's what fails if someone simplifies this to `chrono.parseDate()`. date-fns and Luxon were the obvious alternatives and solve a different layer: both need a format string per pattern, so neither parses `tomorrow` at all, while the DST conversion and 12-hour formatting they *would* replace are already here and tested — 10.9 MB across 5,136 files to swap out ~30 proven lines and leave the actual gap open. `Temporal` would have deleted `zonedToDate` outright at zero cost, but it's still `undefined` in this host's Bun 1.3.2; worth revisiting when it lands, since it arrives on its own schedule rather than ours. |
 | ✅ | **Deploy on merge** | Three workflows: CI on pull requests, a GHCR image on push to `main`, and a deploy that SSHes to the host and restarts it at the sha just built — so a dispatch with an older sha is the rollback, for free. The design cost was all in the last step, because the host is behind NAT with no public SSH address, so the runner joins the WireGuard tunnel as its own peer and reaches sshd through it. What made it expensive was that both of the real faults *succeeded* rather than failing. A forced command in `authorized_keys` runs the pinned command and leaves the client's string in `SSH_ORIGINAL_COMMAND`, so the heredoc that used to carry the remote body landed on stdin unread and `TAG` silently vanished — that's why the remote half is `deploy/host-deploy.sh`, checked into the repo, and why `DEPLOY_PATH` stopped being a secret. And `wg-quick up` configures an interface without handshaking, so it exits 0 into a tunnel that isn't there; the `ping` after it exists purely to make that fail out loud instead of surfacing as an SSH timeout half a job later. Both traps are now documented above, along with the two that only bit this host: a `wg0` on the host and one in a container sharing a keypair, and generated peer configs naming a port the router doesn't forward. The standing cost is that `docker-compose.yaml` and `host-deploy.sh` live on the host too, and CI never updates either. |
 | ✅ | **Looser `timezone:` input** | IANA names are impossible to guess, so the option is autocompleted from `Intl.supportedValuesOf('timeZone')` — no dependency, no list to maintain, and it tracks the runtime's own tzdata. Typed text resolves when it pins down one zone. The find was that strictness wasn't even buying correctness: ICU accepts `EST`, and `EST` is a fixed −5 with no daylight saving, so the old validator waved through the one input most likely to be an hour wrong. `DEFAULT_TZ` goes through the same resolver now, since it had the same hole. |
 | ✅ | **Convert to TypeScript** | The embed codec is where types earn their keep: `fromEmbed` returns a shape that `toEmbed`, the digest, the sweep and every handler all assume, and only one round-trip test enforced it. Nothing was lost to a build step in the end — Node strips types natively, so it still runs straight off the filesystem and the Dockerfile is still three lines; `typescript` is a devDependency that only ever type-checks. The cost is a Node 24 floor and `.ts` in every relative import. |

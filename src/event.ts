@@ -7,7 +7,7 @@ import {
   time,
 } from 'discord.js';
 import type { APIEmbed, Embed, ForumChannel, Message, ThreadChannel } from 'discord.js';
-import type { Event, EventEntry, RsvpChoice } from './types.ts';
+import type { Event, EventEntry, RsvpChoice } from './types/event.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 /** Footer prefix marking a message as one of ours. */
