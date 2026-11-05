@@ -2,12 +2,13 @@
 
 Discord bot to create and manage events in discord threads.
 
-`/event create` opens a forum post for an event, with RSVP buttons on it. One pinned message in a
-board channel always lists every upcoming event, and attendees get a ping before the start time.
+`/event create` opens a forum post for an event, with RSVP buttons on it. One pinned message
+in a board channel lists every upcoming event, and attendees get a ping before the start time.
+One bot serves every server that invites it; no guild ID is needed.
 
-**Discord is the database.** Each forum post's embed *is* the event record, and the digest is found
-by looking up the bot's own pin. There is no database, no volume, and nothing to back up — the
-container is disposable.
+Discord stores each event record in its forum post's embed, and the digest is found by looking up
+the bot's own pin. SQLite stores the forum and digest channel IDs for each server in one shared
+table; Docker Compose keeps that small configuration database in a named volume.
 
 ## Setup
 
@@ -30,10 +31,10 @@ Threads, **Pin Messages**, Embed Links, and Read Message History.
 Pin Messages is its own permission now — Discord split it out of Manage Messages, and the current
 pins endpoint only accepts the new one. If the log says it can't pin the digest, this is why.
 
-**3. Make two channels**
+**3. Make the channels**
 
-A **forum** channel for the events, and a normal **text** channel for the digest. Turn on Discord's
-Developer Mode, then right-click each to copy its ID.
+A **forum** channel for events and a normal **text** channel for the digest. Both are required,
+and their names are up to you. Give the bot the invite permissions above in those channels.
 
 **4. Configure**
 
@@ -49,13 +50,49 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
-Slash commands are registered to your guild on every boot, so they show up immediately and there's
-no deploy step.
+Slash commands are registered globally on every boot and work in every server that invites the
+bot. Discord may take a little time to show a new global definition. They are server-only, so they
+do not appear in DMs. Old guild-scoped `/event` commands are removed automatically during startup
+and when joining a server, so they cannot hide the global definition.
+
+`DISCORD_TOKEN` is the only required environment variable. Timezone, reminder and address-bias
+settings apply across all servers. `DATABASE_PATH` defaults to `./data/grasstoucher.sqlite` for
+local runs; Compose sets it to `/data/grasstoucher.sqlite` inside the container. `GUILD_ID`,
+`EVENT_FORUM_ID` and `DIGEST_CHANNEL_ID` are no longer used and can be removed from an existing
+`.env`. Existing pinned setup records are imported automatically the first time the new version
+starts, then unpinned best-effort.
+
+The `grasstoucher-data` Docker volume survives container rebuilds and `docker compose down`. Keep
+it when deploying new images; `docker compose down -v` removes it and erases the saved channel
+selections. To back up the database, stop the bot and copy the SQLite file from that volume.
+
+For the existing image-only CI deployment, install the updated Compose file on the host **before
+deploying the first SQLite image**. CI does not update that file, so the previous version would
+start the new image without its volume. See [the host upgrade notes](docs/deploy-home-server.md#what-ci-never-updates).
+
+**6. Set up each server**
+
+Someone with **Manage Server** runs:
+
+```
+/setup forum:#your-event-forum digest:#your-digest-channel
+```
+
+Both options are required. The bot checks the channel types and its permissions, saves both IDs in
+SQLite under this server's ID, and posts or refreshes the digest. Run `/setup` again to change
+either channel. No channel name or environment variable supplies a default.
+
+Until setup is complete, every `/event` command and RSVP/cancel button returns a private setup
+error, and autocomplete stays empty. Deleting a selected channel or removing required permissions
+also blocks commands until the problem is fixed or `/setup` is run again. Changes to the selected
+channels or their categories trigger validation again; unrelated channel activity leaves commands
+available. Each sweep checks the selected channels too.
 
 ## Commands
 
 | Command | Notes |
 |---|---|
+| `/setup forum: digest:` | Requires Manage Server. Selects both channels for this server, validates permissions and saves setup in SQLite. Run it again to change the selection. |
 | `/event create title: when: [where:] [description:] [timezone:]` | `when` takes what you'd say out loud and previews the resolved time as you type. `timezone` accepts a city (`Berlin`), an abbreviation (`PST`) or a full IANA name, and defaults to `DEFAULT_TZ`. |
 | `/event edit [title:] [when:] [where:] [description:] [timezone:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
 | `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
@@ -186,22 +223,27 @@ bun run typecheck  # tsc — the real gate; it only checks, it never emits
 bun run dev        # reads .env via --env-file
 ```
 
-Bun 1 or newer, because it runs the TypeScript sources directly. No build step and no `dist/` —
-which is also why every relative import names a `.ts` file: specifiers resolve literally, and
-nothing rewrites `./event.js` for you. Node 24 runs it fine too, but `bun.lock` pins the versions in
-a format only bun reads.
+Bun 1.4 or newer, because it runs the TypeScript sources directly and provides `node:sqlite`. No
+build step and no `dist/` — which is also why every relative import names a `.ts` file: specifiers
+resolve literally, and nothing rewrites `./event.js` for you. Node 24 runs it fine too, but
+`bun.lock` pins the versions in a format only bun reads.
 
-`src/` is the bot, `test/` mirrors it. Only three files have logic worth testing: time parsing and
-timezone conversion, the embed⇄event codec, and address formatting. Everything else is Discord I/O.
-The suite makes no network calls.
+`src/` is the bot, `test/` mirrors it. Tests cover time parsing and timezone conversion, the
+embed⇄event codec, address formatting, configuration, setup persistence, permissions and routing
+between servers. Discord I/O is stubbed; the suite makes no network calls.
 
 | File | Job |
 |---|---|
-| `src/index.ts` | Config validation, boot, interaction routing, the 10-minute sweep |
+| `src/index.ts` | Boot, per-guild contexts and lifecycle, the 10-minute sweep |
+| `src/config.ts` | Environment validation and defaults |
+| `src/database.ts` | Per-guild SQLite setup records and schema initialization |
+| `src/context.ts` | Per-guild setup cache and validation of the explicitly selected channels |
+| `src/setup.ts` | Reads and retires legacy pinned setup records during the SQLite migration |
 | `src/event.ts` | The model: embed codec, forum listing, RSVP rules, the status rule |
 | `src/digest.ts` | Renders the digest and edits the pin in place |
 | `src/interactions.ts` | Assembles `/event` from `src/commands/`, routes interactions, owns the RSVP buttons and autocomplete |
 | `src/commands/create.ts` · `edit.ts` · `cancel.ts` | One file per subcommand: its slice of the `/event` definition beside the handler that serves it. `cancel.ts` also owns the confirm button and the DMs |
+| `src/commands/setup.ts` | Defines `/setup`, checks Manage Server and confirms the saved channel selection |
 | `src/commands/shared.ts` | What more than one subcommand needs: reply shapes, `when:`/`timezone:` parsing, the organizer-or-mod guard |
 | `src/places.ts` | Address lookup for `where:` — Photon adapter and label formatting |
 | `src/time.ts` | Wall clock + IANA zone → instant, DST-correct. Also the loose `when:` parser and the one place a 12-hour string is built |
@@ -248,6 +290,7 @@ Not commitments — what's worth doing next, and what's already landed.
 
 | Status | Change | The finding, and what it costs |
 |:---:|---|---|
+| ✅ | **Run across servers without env IDs** | Global commands and a separate context for each server, with `/setup forum: digest:` choosing both channels explicitly. The finding: channel names cannot tell you which forum an admin intended, and in-memory setup disappears with the container. One SQLite `guild_config` table stores channel IDs by guild; a named Docker volume carries it across container replacement. Costs: Manage Server for setup, Pin Messages for the digest, a one-time scan to migrate old pinned setup records, and one channel fetch per server per sweep. Every event command and button stays blocked until both channels are configured. Back up the volume; `docker compose down -v` removes it. |
 | ❌ | **Self-host Photon** | The public instance disclaims its own availability, and on 2026-08-12 spent ~30s per query against a 2s budget — indistinguishable from down. Code cost is one env var (`ENDPOINT` in `src/places.ts`); the rest is operational, and that's the catch — Java 21+, a search index, and a 64GB RAM recommendation at planet scale, so a 16GB box means a country dump and a capped heap. Plausible, untested. Hosted providers want an account and a key, the exact thing Photon avoided. |
 | ✅ | **Status dots on post names** | 🟢/⚫/🔴 on post names, so state reads from the channel list. The finding: **archive state can't carry it** — renaming an archived thread reopens it, so a dot meaning "archived" destroys what it reports, and auto-archive-on-quiet would redden upcoming events anyway. Discord won't colour a thread name either, so the dot follows event state off the existing `embedColor` rule. Costs: a post now greys at its start time rather than at archive time, one rename per state change against a 2-per-10-min limit, and posts archived before this keep undotted names. |
 | ✅ | **Looser `when:` input** | `tomorrow 7pm` via `chrono-node`, with the resolved instant echoed back before submit — a parser that guesses without showing its work just moves the mistake to after the post exists. The finding: **chrono's own `Date` is the wrong output**, since it resolves against one fixed offset, so a November date parsed in August comes out an hour off; the bridge hands its wall-clock *components* to `zonedToDate` instead, which `test/time.test.ts` pins. Cost: the first runtime dep past discord.js, 2.76 MB. date-fns and Luxon can't parse `tomorrow` at all; `Temporal` would replace `zonedToDate` outright but is still `undefined` in Bun 1.3.2. |

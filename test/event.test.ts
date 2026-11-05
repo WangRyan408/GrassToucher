@@ -91,7 +91,7 @@ test('re-rendering a cancelled event does not stack the marker', () => {
 
 test('un-cancelling leaves no trace of the cancellation', () => {
   // What /event edit uncancel does: read the post back, clear the flag, re-render.
-  const cancelled = fromEmbed(toEmbed(sample({ cancelled: true })).toJSON());
+  const cancelled = fromEmbed(toEmbed(sample({ cancelled: true, startsAt: FUTURE })).toJSON());
   const back = toEmbed({ ...cancelled, cancelled: false }).toJSON();
 
   expect(back.title).toBe('Touch Grass');

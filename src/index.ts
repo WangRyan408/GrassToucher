@@ -1,5 +1,4 @@
 import {
-  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
@@ -7,80 +6,19 @@ import {
   TimestampStyles,
   time,
 } from 'discord.js';
+import type { Guild } from 'discord.js';
+import { loadConfig } from './config.ts';
+import { createContexts } from './context.ts';
+import { openGuildDatabase } from './database.ts';
 import { rebuildDigest } from './digest.ts';
 import { embedColor, ensureOpen, threadName, toEmbed } from './event.ts';
-import { commands, route } from './interactions.ts';
-import { resolveTimeZone } from './time.ts';
-import type { Config, Ctx } from './types/config.ts';
+import { commands, removeGuildCommands, route } from './interactions.ts';
+import type { Ctx } from './types/config.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 // Keep REMINDER_MINUTES comfortably above this, or a sweep can step over the window
 // between "not yet due" and "already started" and skip the ping entirely.
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
-
-function loadConfig(env: NodeJS.ProcessEnv): Config {
-  const required = ['DISCORD_TOKEN', 'GUILD_ID', 'EVENT_FORUM_ID', 'DIGEST_CHANNEL_ID'];
-  const missing = required.filter((key) => !env[key]);
-  if (missing.length) throw new Error(`Missing required env vars: ${missing.join(', ')}`);
-
-  // Through the same resolver the slash option uses, so `DEFAULT_TZ=EST` can't boot into the
-  // fixed-offset zone that ignores daylight saving.
-  const defaultTz = resolveTimeZone(env.DEFAULT_TZ ?? 'UTC');
-  if (!defaultTz) throw new Error(`DEFAULT_TZ is not a timezone I recognise: ${env.DEFAULT_TZ}`);
-
-  const num = (key: string, fallback: number) => {
-    const value = env[key] === undefined ? fallback : Number(env[key]);
-    if (!Number.isFinite(value) || value < 0) throw new Error(`${key} must be a positive number`);
-    return value;
-  };
-
-  // Coordinates get their own parser: num() rejects negatives, and half the planet has a
-  // negative longitude. Reusing it would refuse to boot west of Greenwich.
-  const coord = (key: string, limit: number) => {
-    if (!env[key]) return null;
-    const value = Number(env[key]);
-    if (!Number.isFinite(value) || Math.abs(value) > limit) {
-      throw new Error(`${key} must be a number between -${limit} and ${limit}`);
-    }
-    return value;
-  };
-
-  const lat = coord('PLACE_BIAS_LAT', 90);
-  const lon = coord('PLACE_BIAS_LON', 180);
-  // One without the other silently does nothing, which surfaces as "why is it suggesting
-  // Argentina" rather than as a config error.
-  if ((lat === null) !== (lon === null)) {
-    throw new Error('Set both PLACE_BIAS_LAT and PLACE_BIAS_LON, or neither');
-  }
-
-  return {
-    // `lon` is checked too, so neither is null here — the pair check above only proves it to us.
-    placeBias: lat === null || lon === null ? null : { lat, lon },
-    // The four required keys are what the `missing` check just guaranteed.
-    token: env.DISCORD_TOKEN!,
-    guildId: env.GUILD_ID!,
-    forumId: env.EVENT_FORUM_ID!,
-    digestChannelId: env.DIGEST_CHANNEL_ID!,
-    defaultTz,
-    reminderMinutes: num('REMINDER_MINUTES', 60),
-    archiveGraceHours: num('ARCHIVE_GRACE_HOURS', 12),
-  };
-}
-
-async function buildContext(client: Client<true>, config: Config): Promise<Ctx> {
-  const guild = await client.guilds.fetch(config.guildId);
-  const forum = await guild.channels.fetch(config.forumId);
-  const digestChannel = await guild.channels.fetch(config.digestChannelId);
-
-  if (forum?.type !== ChannelType.GuildForum) {
-    throw new Error(`EVENT_FORUM_ID must point at a forum channel (got type ${forum?.type})`);
-  }
-  if (!digestChannel?.isTextBased() || digestChannel.isThread()) {
-    throw new Error('DIGEST_CHANNEL_ID must point at a normal text channel');
-  }
-
-  return { client, config, guild, forum, digestChannel };
-}
 
 /**
  * Ping attendees shortly before start, tidy up finished events, then refresh the digest.
@@ -135,6 +73,7 @@ async function sweep(ctx: Ctx) {
 }
 
 const config = loadConfig(process.env);
+const guildDatabase = openGuildDatabase(config.databasePath);
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // `readyClient` is the same object as `client`, but typed Client<true> — logged in, so its
@@ -147,15 +86,21 @@ client.once(Events.ClientReady, async (readyClient) => {
         'searching "dolores park" can return Argentina. Set them to your area.',
     );
   }
-  const ctx = await buildContext(readyClient, config);
+  const contexts = createContexts(readyClient, config, guildDatabase);
+  const pendingChannels = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingDeletes = new Map<string, ReturnType<typeof setTimeout>>();
 
-  // Guild-scoped registration is idempotent and propagates instantly, so there's no
-  // separate deploy step to remember.
-  await ctx.guild.commands.set(commands);
+  const initializeGuild = async (guild: Guild) => {
+    await contexts.refresh(guild);
+    // Old guild commands can shadow the global definition after an upgrade. Delete only our
+    // slash commands, leaving any other application commands alone.
+    const { error } = await tryCatch(removeGuildCommands(guild));
+    if (error) console.error(`[${guild.id}] Legacy command cleanup failed:`, error);
+  };
 
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
-      await route(interaction, ctx);
+      await route(interaction, config, contexts);
     } catch (error) {
       console.error('Interaction failed:', error);
       const sorry = {
@@ -179,17 +124,65 @@ client.once(Events.ClientReady, async (readyClient) => {
   // Deleting a post is how you really cancel an event, so it shouldn't wait out the sweep.
   // Debounced because clearing out several posts fires one event each, and every rebuild
   // re-reads the whole forum.
-  let pending: ReturnType<typeof setTimeout> | undefined;
   client.on(Events.ThreadDelete, (thread) => {
-    if (thread.parentId !== ctx.forum.id) return;
-    clearTimeout(pending);
-    pending = setTimeout(
-      () => rebuildDigest(ctx).catch((error) => console.error('Rebuild after delete failed:', error)),
-      1500,
-    );
+    const ctx = contexts.get(thread.guild.id);
+    if (!ctx || typeof ctx === 'string' || thread.parentId !== ctx.forum.id) return;
+    clearTimeout(pendingDeletes.get(thread.guild.id));
+    pendingDeletes.set(thread.guild.id, setTimeout(() => {
+      pendingDeletes.delete(thread.guild.id);
+      const current = contexts.get(thread.guild.id);
+      if (!current || typeof current === 'string') return;
+      rebuildDigest(current).catch((error) =>
+        console.error(`[${thread.guild.id}] Rebuild after delete failed:`, error),
+      );
+    }, 1500));
   });
 
-  const tick = () => sweep(ctx).catch((error) => console.error('Sweep failed:', error));
+  // Unrelated channel activity must not disable a configured server or postpone its recovery.
+  // Include the selected channels' categories, since their permissions can affect setup too.
+  const channelsChanged = (guild: Guild, channelId: string) => {
+    if (!contexts.invalidate(guild.id, channelId)) return;
+    clearTimeout(pendingChannels.get(guild.id));
+    pendingChannels.set(guild.id, setTimeout(() => {
+      pendingChannels.delete(guild.id);
+      void contexts.refresh(guild);
+    }, 1500));
+  };
+  client.on(Events.ChannelCreate, (channel) => channelsChanged(channel.guild, channel.id));
+  client.on(Events.ChannelUpdate, (_old, channel) => {
+    if ('guild' in channel) channelsChanged(channel.guild, channel.id);
+  });
+  client.on(Events.ChannelDelete, (channel) => {
+    if ('guild' in channel) channelsChanged(channel.guild, channel.id);
+  });
+  client.on(Events.GuildCreate, (guild) => void initializeGuild(guild));
+  client.on(Events.GuildDelete, (guild) => {
+    contexts.remove(guild.id);
+    clearTimeout(pendingChannels.get(guild.id));
+    clearTimeout(pendingDeletes.get(guild.id));
+    pendingChannels.delete(guild.id);
+    pendingDeletes.delete(guild.id);
+  });
+
+  await readyClient.application.commands.set(commands);
+  await Promise.all([...readyClient.guilds.cache.values()].map(initializeGuild));
+
+  let sweeping = false;
+  const tick = async () => {
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      await Promise.all([...readyClient.guilds.cache.values()].map(async (guild) => {
+        await contexts.refresh(guild);
+        const ctx = contexts.get(guild.id);
+        if (!ctx || typeof ctx === 'string') return;
+        const { error } = await tryCatch(sweep(ctx));
+        if (error) console.error(`[${guild.id}] Sweep failed:`, error);
+      }));
+    } finally {
+      sweeping = false;
+    }
+  };
   await tick();
   setInterval(tick, SWEEP_INTERVAL_MS);
   console.log('Ready.');

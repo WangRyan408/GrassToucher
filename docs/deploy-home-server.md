@@ -155,3 +155,17 @@ re-run, or keep it private and `docker login ghcr.io` on the host with a `read:p
 
 `docker-compose.yaml` and `deploy/host-deploy.sh` live on the host too. A change to either needs a
 `git pull` there.
+
+For the SQLite upgrade, install the updated `docker-compose.yaml` on the host **before deploying
+the new image**. It adds the `grasstoucher-data` volume mounted at `/data`. The old Compose file
+would let the new image write setup into its disposable container filesystem, and the migration
+would then unpin the old Discord setup records. Updating only the image is insufficient.
+
+After deployment, verify the bot's mounts without printing its environment or token:
+
+```sh
+docker inspect --format '{{json .Mounts}}' "$(docker compose ps -q bot)"
+```
+
+The output must include a volume with `Destination` set to `/data`. Keep that volume when
+recreating the container.

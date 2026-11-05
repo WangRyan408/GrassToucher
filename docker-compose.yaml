@@ -7,8 +7,15 @@ services:
     # After a `pull` the image exists, so `up -d` uses it rather than rebuilding.
     build: .
     env_file: .env
+    environment:
+      DATABASE_PATH: /data/grasstoucher.sqlite
     restart: unless-stopped
     # bun is no better a PID 1 than Node was; this forwards SIGTERM so `down` is quick.
     init: true
-    # No volumes: every event lives in Discord, so the container holds no state.
+    # SQLite stores only guild channel selections; event records remain in Discord.
+    volumes:
+      - grasstoucher-data:/data
     # No ports: the bot dials out over a websocket and never listens.
+
+volumes:
+  grasstoucher-data:

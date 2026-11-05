@@ -5,29 +5,52 @@
  * Wiring is explicit rather than a name → handler registry. There are three subcommands, and
  * an if-chain reads better than a lookup table plus the ceremony of registering into it.
  */
-import { SlashCommandBuilder } from 'discord.js';
-import type { AutocompleteInteraction, ButtonInteraction, Interaction } from 'discord.js';
+import {
+  ApplicationCommandType,
+  ApplicationIntegrationType,
+  InteractionContextType,
+  SlashCommandBuilder,
+} from 'discord.js';
+import type { AutocompleteInteraction, ButtonInteraction, Guild, Interaction } from 'discord.js';
 import { CANCEL_ID, cancelSubcommand, handleCancel, handleCancelConfirm } from './commands/cancel.ts';
 import { createSubcommand, handleCreate } from './commands/create.ts';
 import { editSubcommand, handleEdit } from './commands/edit.ts';
+import { handleSetup, setupCommand } from './commands/setup.ts';
 import { ephemeral } from './commands/shared.ts';
 import { rebuildDigest } from './digest.ts';
 import { CHOICES, applyRsvp, ensureOpen, fromEmbed, isOurs, rsvpRow, toEmbed } from './event.ts';
 import { searchPlaces } from './places.ts';
 import { resolveTimeZone, searchTimeZones, searchWhen } from './time.ts';
-import type { Ctx } from './types/config.ts';
+import type { Config, Ctx } from './types/config.ts';
 import type { RsvpChoice } from './types/event.ts';
+import type { GuildContexts } from './types/setup.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 export const commands = [
   new SlashCommandBuilder()
     .setName('event')
     .setDescription('Create and manage events')
+    .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
     .addSubcommand(createSubcommand)
     .addSubcommand(editSubcommand)
     .addSubcommand(cancelSubcommand)
     .toJSON(),
+  setupCommand,
 ];
+
+/** A previous single-guild install registered these locally, which can hide global updates. */
+export async function removeGuildCommands(guild: Guild): Promise<void> {
+  const registered = await guild.commands.fetch();
+  for (const command of registered.values()) {
+    if (
+      command.type === ApplicationCommandType.ChatInput &&
+      commands.some((c) => c.name === command.name)
+    ) {
+      await command.delete();
+    }
+  }
+}
 
 /** `hasOwn`, not `in`: the prototype chain would answer yes to a custom id of `rsvp:toString`. */
 const isChoice = (value: string): value is RsvpChoice => Object.hasOwn(CHOICES, value);
@@ -38,6 +61,9 @@ const isChoice = (value: string): value is RsvpChoice => Object.hasOwn(CHOICES, 
  * it, so this stays unguarded.
  */
 async function handleRsvp(interaction: ButtonInteraction, ctx: Ctx) {
+  if (!interaction.channel?.isThread() || interaction.channel.parentId !== ctx.forum.id) {
+    return interaction.reply(ephemeral("Run this inside the event's thread."));
+  }
   const choice = interaction.customId.split(':')[1];
   if (!isChoice(choice)) return;
   if (!isOurs(interaction.message, ctx.client.user.id)) return;
@@ -82,12 +108,12 @@ async function handleRsvp(interaction: ButtonInteraction, ctx: Ctx) {
  * Still a try/catch rather than a `tryCatch`: `getFocused(true)` throws *synchronously*, and
  * tryCatch only wraps a promise.
  */
-async function handleAutocomplete(interaction: AutocompleteInteraction, ctx: Ctx) {
+async function handleAutocomplete(interaction: AutocompleteInteraction, config: Config) {
   try {
     const focused = interaction.options.getFocused(true); // Throws with nothing focused.
     if (focused.name === 'timezone') {
       // No await on the search itself: the zone list is in-process.
-      return interaction.respond(searchTimeZones(focused.value, ctx.config.defaultTz));
+      return interaction.respond(searchTimeZones(focused.value, config.defaultTz));
     }
     if (focused.name === 'when') {
       // Half-typed sibling options come through on an autocomplete interaction, so a zone already
@@ -95,11 +121,11 @@ async function handleAutocomplete(interaction: AutocompleteInteraction, ctx: Ctx
       // `timezone:` after, the choice's stored wall clock still means what it says — only the
       // preview was drawn in the default zone, which is why the label names the zone it used.
       const requested = interaction.options.getString('timezone')?.trim();
-      const tz = (requested && resolveTimeZone(requested)) || ctx.config.defaultTz;
+      const tz = (requested && resolveTimeZone(requested)) || config.defaultTz;
       return interaction.respond(searchWhen(focused.value, tz));
     }
     if (focused.name !== 'where') return interaction.respond([]);
-    await interaction.respond(await searchPlaces(focused.value, ctx.config.placeBias));
+    await interaction.respond(await searchPlaces(focused.value, config.placeBias));
   } catch (error) {
     console.error('Autocomplete failed:', error);
     // May itself throw if the respond above already landed; nothing left to do either way.
@@ -107,9 +133,39 @@ async function handleAutocomplete(interaction: AutocompleteInteraction, ctx: Ctx
   }
 }
 
-export async function route(interaction: Interaction, ctx: Ctx) {
+export async function route(
+  interaction: Interaction,
+  config: Config,
+  contexts: GuildContexts,
+) {
   // First: this fires on every keystroke, so it's the busiest branch by a wide margin.
-  if (interaction.isAutocomplete()) return handleAutocomplete(interaction, ctx);
+  // Autocomplete cannot show an ephemeral error; keep it empty until setup is complete. The
+  // cached check also avoids racing a Discord fetch against the autocomplete deadline.
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName !== 'event') return;
+    if (!interaction.inGuild()) return interaction.respond([]);
+    const ctx = contexts.get(interaction.guildId);
+    if (typeof ctx === 'string' || ctx.guild.id !== interaction.guildId) return interaction.respond([]);
+    return handleAutocomplete(interaction, config);
+  }
+
+  const isCommand = interaction.isChatInputCommand() &&
+    (interaction.commandName === 'event' || interaction.commandName === 'setup');
+  const isButton = interaction.isButton() && (
+    interaction.customId === CANCEL_ID || interaction.customId.startsWith('rsvp:')
+  );
+  if (!isCommand && !isButton) return;
+  if (!interaction.inGuild()) {
+    return interaction.reply(ephemeral('Use this command in a server with an event forum.'));
+  }
+  if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
+    return handleSetup(interaction, contexts);
+  }
+  const ctx = contexts.get(interaction.guildId);
+  if (typeof ctx === 'string') return interaction.reply(ephemeral(ctx));
+  if (ctx.guild.id !== interaction.guildId) {
+    return interaction.reply(ephemeral('I could not load this server\'s event forum.'));
+  }
 
   if (interaction.isChatInputCommand() && interaction.commandName === 'event') {
     const sub = interaction.options.getSubcommand();

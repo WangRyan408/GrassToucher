@@ -3,6 +3,7 @@
 FROM oven/bun:1-alpine
 
 ENV NODE_ENV=production
+ENV DATABASE_PATH=/data/grasstoucher.sqlite
 WORKDIR /app
 
 # --frozen-lockfile so a stale bun.lock fails the build instead of quietly resolving newer
@@ -11,6 +12,8 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 COPY src ./src
+
+RUN mkdir -p /data && chown bun:bun /data
 
 USER bun
 CMD ["bun", "src/index.ts"]
