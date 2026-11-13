@@ -2,7 +2,7 @@
  * The interaction router: assembles `/event` out of `src/commands/`, and owns the two
  * interactions that belong to no single command — the RSVP buttons and autocomplete.
  *
- * Wiring is explicit rather than a name → handler registry. There are three subcommands, and
+ * Wiring is explicit rather than a name → handler registry. There are only a few subcommands, and
  * an if-chain reads better than a lookup table plus the ceremony of registering into it.
  */
 import {
@@ -15,6 +15,7 @@ import type { AutocompleteInteraction, ButtonInteraction, Guild, Interaction } f
 import { CANCEL_ID, cancelSubcommand, handleCancel, handleCancelConfirm } from './commands/cancel.ts';
 import { createSubcommand, handleCreate } from './commands/create.ts';
 import { editSubcommand, handleEdit } from './commands/edit.ts';
+import { handlePause, pauseSubcommand } from './commands/pause.ts';
 import { handleSetup, setupCommand } from './commands/setup.ts';
 import { ephemeral } from './commands/shared.ts';
 import { rebuildDigest } from './digest.ts';
@@ -35,6 +36,7 @@ export const commands = [
     .addSubcommand(createSubcommand)
     .addSubcommand(editSubcommand)
     .addSubcommand(cancelSubcommand)
+    .addSubcommand(pauseSubcommand)
     .toJSON(),
   setupCommand,
 ];
@@ -172,6 +174,7 @@ export async function route(
     if (sub === 'create') return handleCreate(interaction, ctx);
     if (sub === 'edit') return handleEdit(interaction, ctx);
     if (sub === 'cancel') return handleCancel(interaction, ctx);
+    if (sub === 'pause') return handlePause(interaction, ctx);
     return;
   }
   if (interaction.isButton()) {

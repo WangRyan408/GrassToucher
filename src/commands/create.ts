@@ -8,6 +8,7 @@ import { MessageFlags, ThreadAutoArchiveDuration, TimestampStyles, time } from '
 import type { ChatInputCommandInteraction, SlashCommandSubcommandBuilder } from 'discord.js';
 import { rebuildDigest } from '../digest.ts';
 import { rsvpRow, threadName, toEmbed } from '../event.ts';
+import { isRecurrenceFrequency, RECURRENCE_CHOICES } from '../recurrence.ts';
 import { formatWhen } from '../time.ts';
 import type { Ctx } from '../types/config.ts';
 import type { Event } from '../types/event.ts';
@@ -23,7 +24,7 @@ export const createSubcommand = (sub: SlashCommandSubcommandBuilder) =>
     .addStringOption((o) =>
       o
         .setName('when')
-        .setDescription('Start time — try "tomorrow 7pm", "Friday 7:30 PM" or "Aug 15 7pm"')
+        .setDescription('Start time — try "tomorrow 7pm", "Friday 7:30 PM" or "TBD"')
         .setRequired(true)
         .setAutocomplete(true),
     )
@@ -40,12 +41,20 @@ export const createSubcommand = (sub: SlashCommandSubcommandBuilder) =>
         .setName('timezone')
         .setDescription('Timezone — type a city or abbreviation, e.g. Berlin, PST')
         .setAutocomplete(true),
+    )
+    .addStringOption((o) =>
+      o.setName('recurring').setDescription('Repeat daily, weekly, every 2 weeks or monthly')
+        .addChoices(...RECURRENCE_CHOICES),
     );
 
 export async function handleCreate(interaction: ChatInputCommandInteraction, ctx: Ctx) {
   const parsed = parseWhen(interaction, ctx);
   if (typeof parsed === 'string') return interaction.reply(ephemeral(parsed));
-  if (parsed.startsAt.getTime() < Date.now()) {
+  const frequency = interaction.options.getString('recurring');
+  if (frequency !== null && !isRecurrenceFrequency(frequency)) {
+    return interaction.reply(ephemeral('Choose `daily`, `weekly`, `bi-weekly` or `monthly` for recurring.'));
+  }
+  if (parsed.startsAt && parsed.startsAt.getTime() < Date.now()) {
     // Name what it read, rather than only that it's wrong. Loose input can land somewhere
     // unintended, and a date with no clock time means midnight — which by the evening is behind
     // you, so "tonight" arrives here rather than at the time the word suggests.
@@ -76,6 +85,8 @@ export async function handleCreate(interaction: ChatInputCommandInteraction, ctx
     organizerId: interaction.user.id,
     reminded: false,
     cancelled: false,
+    recurring: frequency ? { frequency, timeZone: parsed.tz, anchor: parsed.startsAt } : null,
+    pausedUntil: null,
     rsvp: { going: [interaction.user.id], maybe: [], no: [] },
   };
 
@@ -92,9 +103,11 @@ export async function handleCreate(interaction: ChatInputCommandInteraction, ctx
   // read in a zone three hours west of where they are.
   return interaction.editReply(
     content(
-      `Created ${thread.toString()} — you're down as going. Starts ` +
-        `${time(event.startsAt, TimestampStyles.FullDateShortTime)} ` +
-        `(${time(event.startsAt, TimestampStyles.RelativeTime)}).`,
+      `Created ${thread.toString()} — you're down as going. ` +
+        (event.startsAt
+          ? `Starts ${time(event.startsAt, TimestampStyles.FullDateShortTime)} ` +
+            `(${time(event.startsAt, TimestampStyles.RelativeTime)}).`
+          : 'Date TBD.'),
     ),
   );
 }

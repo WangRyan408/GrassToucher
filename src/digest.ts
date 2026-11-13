@@ -1,6 +1,7 @@
 import { EmbedBuilder, TimestampStyles, time } from 'discord.js';
 import type { GuildTextBasedChannel, Message } from 'discord.js';
-import { CHOICES, COLOR_UPCOMING, MARKER, listEvents } from './event.ts';
+import { CHOICES, COLOR_UPCOMING, MARKER, compareEvents, isPaused, listEvents } from './event.ts';
+import { recurrenceLabel } from './recurrence.ts';
 import type { Ctx } from './types/config.ts';
 import type { EventEntry } from './types/event.ts';
 import { tryCatch } from './utils/tryCatch.ts';
@@ -26,16 +27,20 @@ export function renderDigest(entries: EventEntry[]): EmbedBuilder {
   }
 
   const lines = entries.slice(0, MAX_LINES).map(({ thread, event }) => {
-    const when = `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`;
+    const when = event.startsAt
+      ? `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`
+      : 'Date TBD';
     // Brackets in a title would break out of the markdown link.
     const label = event.title.replaceAll('[', '(').replaceAll(']', ')');
     const link = `[${label}](${thread.url})`;
 
     // An embed description is one of the few places strikethrough actually renders, so
     // this is where a cancellation reads as one. RSVP count and location are moot now.
-    if (event.cancelled) return `~~**${link}**~~ **CANCELLED**\n${when}`;
+    const recurrence = event.recurring ? `🔁 ${recurrenceLabel(event.recurring)}` : null;
+    if (event.cancelled) return `~~**${link}**~~ **CANCELLED**\n${when}${recurrence ? ` · ${recurrence}` : ''}`;
 
     const bits = [when, `${CHOICES.going.emoji} ${event.rsvp.going.length}`];
+    if (recurrence) bits.push(recurrence);
     if (event.where) bits.push(`📍 ${event.where}`);
     return `**${link}**\n${bits.join(' · ')}`;
   });
@@ -103,9 +108,16 @@ export async function upsertDigest(
  */
 export async function rebuildDigest(ctx: Ctx): Promise<EventEntry[]> {
   const entries = await listEvents(ctx.forum, ctx.client.user.id);
+  await updateDigest(ctx, entries);
+  return entries;
+}
+
+/** The sweep already read the forum; render its updated occurrences without fetching them twice. */
+export async function updateDigest(ctx: Ctx, entries: EventEntry[]): Promise<void> {
   const cutoff = Date.now() - ctx.config.archiveGraceHours * 3_600_000;
-  const active = entries.filter(({ event }) => event.startsAt.getTime() > cutoff);
+  const active = entries.filter(({ event }) =>
+    !isPaused(event) && (event.recurring || !event.startsAt || event.startsAt.getTime() > cutoff),
+  ).sort(compareEvents);
 
   await upsertDigest(ctx.digestChannel, active, ctx.client.user.id);
-  return entries;
 }

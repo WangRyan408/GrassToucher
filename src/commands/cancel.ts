@@ -56,7 +56,9 @@ export async function notifyAttendees(
   recipients: string[],
   { restored = false }: { restored?: boolean } = {},
 ) {
-  const when = `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`;
+  const when = event.startsAt
+    ? `${time(event.startsAt, TimestampStyles.LongDateTime)} (${time(event.startsAt, TimestampStyles.RelativeTime)})`
+    : 'date TBD';
   const title = escapeMarkdown(event.title);
   const guild = escapeMarkdown(ctx.guild.name);
 
@@ -68,7 +70,7 @@ export async function notifyAttendees(
       ].join('\n')
     : [
         `**Cancelled: ${title}**`,
-        `In **${guild}** · was scheduled for ${when}`,
+        `In **${guild}** · ${event.startsAt ? `was scheduled for ${when}` : 'date was TBD'}`,
         `Cancelled by ${actor.toString()} · ${thread.url}`,
       ].join('\n');
 
