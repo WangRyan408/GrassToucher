@@ -220,7 +220,7 @@ test('the loose parser rejects junk rather than guessing', () => {
   expect(parseWhenInput('tomorrow 7pm', 'Mars/Olympus', NOW)).toBeNull();
 });
 
-test('every time suggestion is submittable, future, and fits what Discord accepts', () => {
+test('every dated suggestion is submittable, future, and fits what Discord accepts', () => {
   // The same guard as the zone list: a choice whose value parseWhenInput can't read, or that
   // resolves to a time already gone, would be rejected the moment someone picked it.
   for (const query of ['', '7', '7:30', 'friday', 'tomorrow', 'Aug 15', 'in 2 hours', 'tonight']) {
@@ -228,10 +228,11 @@ test('every time suggestion is submittable, future, and fits what Discord accept
     expect(choices.length, `"${query}" returned ${choices.length}`).toBeLessThanOrEqual(25);
     expect(choices.length, `"${query}" returned nothing`).toBeGreaterThan(0);
     for (const { name, value } of choices) {
+      expect(name.length, `${name} is too long for a Discord choice`).toBeLessThanOrEqual(100);
+      if (value === 'TBD') continue;
       const at = zonedToDate(value, LA);
       expect(at, `${value} (for "${query}") is not a usable time`).not.toBeNull();
       expect(at!.getTime(), `${value} (for "${query}") is in the past`).toBeGreaterThan(NOW.getTime());
-      expect(name.length, `${name} is too long for a Discord choice`).toBeLessThanOrEqual(100);
     }
   }
 });
@@ -259,10 +260,20 @@ test('suggestions are offered before anything is typed, and never for junk', () 
   expect(presets.length).toBeGreaterThan(3);
   expect(presets[0]?.name).toContain('today');
   // Sorted soonest-first, so the dropdown reads as a timeline.
-  const times = presets.map((c) => zonedToDate(c.value, LA)!.getTime());
+  const times = presets.filter((c) => c.value !== 'TBD').map((c) => zonedToDate(c.value, LA)!.getTime());
   expect(times).toStrictEqual([...times].sort((a, b) => a - b));
   expect(searchWhen('asdfqwer', LA, NOW)).toStrictEqual([]);
   expect(searchWhen('7:30', 'Mars/Olympus', NOW)).toStrictEqual([]);
+});
+
+test('TBD is offered before typing and when searching for it, without matching tomorrow', () => {
+  expect(searchWhen('', LA, NOW)).toContainEqual(expect.objectContaining({ value: 'TBD' }));
+  for (const query of ['t', 'tb', 'tbd', '  TbD  ']) {
+    expect(searchWhen(query, LA, NOW)).toEqual([
+      { name: expect.stringContaining('TBD'), value: 'TBD' },
+    ]);
+  }
+  expect(searchWhen('tomorrow', LA, NOW).some((choice) => choice.value === 'TBD')).toBe(false);
 });
 
 test('a picked suggestion round-trips back to the same instant', () => {

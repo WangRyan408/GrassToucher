@@ -1,76 +1,16 @@
-import {
-  Client,
-  Events,
-  GatewayIntentBits,
-  MessageFlags,
-  TimestampStyles,
-  time,
-} from 'discord.js';
+import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import type { Guild } from 'discord.js';
 import { loadConfig } from './config.ts';
 import { createContexts } from './context.ts';
 import { openGuildDatabase } from './database.ts';
 import { rebuildDigest } from './digest.ts';
-import { embedColor, ensureOpen, threadName, toEmbed } from './event.ts';
 import { commands, removeGuildCommands, route } from './interactions.ts';
-import type { Ctx } from './types/config.ts';
+import { sweep } from './sweep.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
 // Keep REMINDER_MINUTES comfortably above this, or a sweep can step over the window
 // between "not yet due" and "already started" and skip the ping entirely.
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
-
-/**
- * Ping attendees shortly before start, tidy up finished events, then refresh the digest.
- *
- * Reminders are idempotent through the `reminded` marker in the embed footer, and the
- * lower time bound means a bot that was offline through the window stays quiet rather
- * than announcing an event that already started.
- *
- * Keeping the status dot current is also what lifted the colour check out of the archive step.
- * The dot and the embed colour are one fact rendered twice, so they have to move together — and
- * `embedColor` has always said grey the moment an event starts, so a post now goes grey and ⚫
- * at its start time rather than hours later when the grace period happens to run out.
- */
-async function sweep(ctx: Ctx) {
-  const entries = await rebuildDigest(ctx);
-  const now = Date.now();
-  const reminderMs = ctx.config.reminderMinutes * 60_000;
-  const graceMs = ctx.config.archiveGraceHours * 3_600_000;
-
-  for (const { thread, message, event } of entries) {
-    const untilStart = event.startsAt.getTime() - now;
-
-    if (!event.cancelled && !event.reminded && untilStart >= 0 && untilStart <= reminderMs) {
-      await ensureOpen(thread);
-      const invitees = [...event.rsvp.going, ...event.rsvp.maybe];
-      const who = invitees.length ? invitees.map((id) => `<@${id}>`).join(' ') : '';
-      const when = time(event.startsAt, TimestampStyles.RelativeTime);
-      await thread.send(`**${event.title}** starts ${when}. ${who}`.trim());
-      await message.edit({ embeds: [toEmbed({ ...event, reminded: true })] });
-      continue; // Leave archiving for a later sweep.
-    }
-
-    // Both renderings of the state, checked together so the post can't contradict itself.
-    // Only while it's open, and before the archive step: renaming an archived thread reopens
-    // it, so a sweep that "fixed" a dot on an archived post would undo the archiving below and
-    // fight itself every ten minutes. An archived post keeps the dot it went in with — which
-    // is the one this block set on the way out, since a post is still open when it gets here.
-    if (!thread.archived) {
-      // Compare against what toEmbed and threadName would pick, not fixed constants: a
-      // cancelled event stays red forever, and a mismatched test here re-renders every sweep.
-      if (message.embeds[0]?.color !== embedColor(event)) {
-        await message.edit({ embeds: [toEmbed(event)] }); // Re-renders grey now it's past.
-      }
-      const name = threadName(event);
-      if (thread.name !== name) await thread.setName(name);
-    }
-
-    if (untilStart < -graceMs && !thread.archived) {
-      await thread.setArchived(true, 'Event finished');
-    }
-  }
-}
 
 const config = loadConfig(process.env);
 const guildDatabase = openGuildDatabase(config.databasePath);

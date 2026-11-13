@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import {
   CANCELLED_SUFFIX,
   COLOR_CANCELLED,
+  COLOR_PAUSED,
   COLOR_UPCOMING,
   MAX_PER_LIST,
   STATUS,
@@ -9,6 +10,7 @@ import {
   displayTitle,
   embedColor,
   fromEmbed,
+  isPaused,
   notifyRecipients,
   threadName,
   toEmbed,
@@ -32,6 +34,8 @@ const sample = (over: Partial<Event> = {}): Event => ({
   organizerId: '111111111111111111',
   reminded: false,
   cancelled: false,
+  recurring: null,
+  pausedUntil: null,
   rsvp: { going: ['111111111111111111', '222222222222222222'], maybe: ['333333333333333333'], no: [] },
   ...over,
 });
@@ -42,6 +46,63 @@ const roundTrip = (event: Event) => fromEmbed(toEmbed(event).toJSON());
 test('survives a round-trip through the embed', () => {
   const event = sample();
   expect(roundTrip(event)).toStrictEqual(event);
+});
+
+test('TBD survives an embed round-trip without acquiring a timestamp', () => {
+  for (const cancelled of [false, true]) {
+    const event = sample({ startsAt: null, cancelled });
+    const embed = toEmbed(event).toJSON();
+    expect(embed.timestamp).toBeUndefined();
+    expect(embed.fields?.find((field) => field.name === 'When')?.value).toBe('TBD');
+    expect(roundTrip(event)).toStrictEqual(event);
+    expect(embed.color).toBe(cancelled ? COLOR_CANCELLED : COLOR_UPCOMING);
+    expect(threadName(event).startsWith(cancelled ? STATUS.cancelled.dot : STATUS.upcoming.dot)).toBe(true);
+  }
+});
+
+test('a missing legacy timestamp is not silently turned into TBD', () => {
+  const embed = toEmbed(sample()).toJSON();
+  delete embed.timestamp;
+  expect(fromEmbed(embed).startsAt).toEqual(new Date(0));
+});
+
+test('recurring and pause state survive an embed round-trip, including milliseconds', () => {
+  const event = sample({ recurring: { frequency: 'weekly', timeZone: 'UTC', anchor: FUTURE }, pausedUntil: new Date('2999-01-01T00:00:00.123Z') });
+  expect(roundTrip(event)).toStrictEqual(event);
+  const embed = toEmbed(event).toJSON();
+  expect(embed.fields?.find((field) => field.name === 'Recurring')?.value).toBe('Weekly (UTC)');
+  expect(embed.fields?.find((field) => field.name === 'Paused until')?.value).toContain('<t:');
+  expect(embed.color).toBe(COLOR_PAUSED);
+  expect(threadName(event)).toBe('🟡 Touch Grass');
+});
+
+test('legacy posts default to one-off and unpaused, and malformed pause markers are ignored', () => {
+  const embed = toEmbed(sample()).toJSON();
+  expect(fromEmbed(embed).recurring).toBeNull();
+  expect(fromEmbed(embed).pausedUntil).toBeNull();
+  for (const marker of ['paused:garbage', 'paused:999999999999999999999999999999999999', 'not-recurring']) {
+    embed.footer = { text: `GrassToucher · org:111111111111111111 · ${marker}` };
+    expect(fromEmbed(embed).pausedUntil).toBeNull();
+    expect(fromEmbed(embed).recurring).toBeNull();
+  }
+});
+
+test('old boolean recurrence stays listed without inventing a cadence', () => {
+  const embed = toEmbed(sample()).toJSON();
+  embed.footer = { text: 'GrassToucher · org:111111111111111111 · recurring' };
+  const event = fromEmbed(embed);
+  expect(event.recurring).toEqual({ frequency: null, timeZone: null, anchor: null });
+  expect(roundTrip(event)).toEqual(event);
+  expect(toEmbed(event).toJSON().fields?.find((field) => field.name === 'Recurring')?.value)
+    .toContain('/event edit recurring:');
+});
+
+test('recurring events stay green after the start time, and an expired pause no longer hides them', () => {
+  const recurring = sample({ startsAt: PAST, recurring: { frequency: 'weekly', timeZone: 'UTC', anchor: FUTURE }, pausedUntil: PAST });
+  expect(isPaused(recurring)).toBe(false);
+  expect(threadName(recurring)).toBe('🟢 Touch Grass');
+  expect(embedColor(recurring)).toBe(COLOR_UPCOMING);
+  expect(toEmbed(recurring).toJSON().fields?.some((field) => field.name === 'Paused until')).toBe(false);
 });
 
 test('carries the reminded marker without disturbing the organizer id', () => {

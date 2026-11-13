@@ -22,6 +22,7 @@ function interaction(guildId: string | null, commandName = 'event', subcommand =
     options: {
       getSubcommand: () => subcommand,
       getString: (name: string) => values[name] ?? null,
+      getBoolean: () => null,
       getChannel: (name: string) => ({ id: name === 'forum' ? '111' : '222' }),
     },
     isAutocomplete: () => false,
@@ -62,6 +63,20 @@ test('global setup requires both typed channel choices and Manage Server', () =>
   expect(commands.find((command) => command.name === 'event')!.default_member_permissions).toBeUndefined();
 });
 
+test('event create offers four optional recurrence choices and pause has only a required duration', () => {
+  const command = commands.find((command) => command.name === 'event')!;
+  expect(command.options).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: 'create', options: expect.arrayContaining([
+      expect.objectContaining({ name: 'recurring', type: ApplicationCommandOptionType.String,
+        choices: ['daily', 'weekly', 'bi-weekly', 'monthly'].map((value) => ({ name: value, value })),
+      }),
+    ]) }),
+    expect.objectContaining({ name: 'pause', options: [
+      expect.objectContaining({ name: 'duration', type: ApplicationCommandOptionType.String, required: true }),
+    ] }),
+  ]));
+});
+
 test('each configured server creates events and updates its own digest', async () => {
   const one = context('one');
   const two = context('two');
@@ -81,7 +96,7 @@ test('each configured server creates events and updates its own digest', async (
   }));
 });
 
-test.each(['create', 'edit', 'cancel'])('%s is blocked until both channels are configured', async (subcommand) => {
+test.each(['create', 'edit', 'cancel', 'pause'])('%s is blocked until both channels are configured', async (subcommand) => {
   const command = interaction('unconfigured', 'event', subcommand);
   await route(command, config, controls());
   expect(command.reply).toHaveBeenCalledWith({ content: SETUP_REQUIRED, flags: MessageFlags.Ephemeral });
@@ -162,6 +177,24 @@ test('autocomplete stays empty before setup and resumes after setup', async () =
   expect(command.respond).toHaveBeenLastCalledWith(expect.arrayContaining([
     expect.objectContaining({ value: 'Europe/Berlin' }),
   ]));
+});
+
+test.each(['create', 'edit'])('%s autocomplete offers TBD only after setup', async (subcommand) => {
+  const command = {
+    guildId: 'one', commandName: 'event', isAutocomplete: () => true, inGuild: () => true,
+    options: {
+      getSubcommand: () => subcommand,
+      getFocused: () => ({ name: 'when', value: 'tb' }),
+      getString: () => null,
+    },
+    respond: vi.fn(),
+  } as unknown as AutocompleteInteraction;
+  await route(command, config, controls());
+  expect(command.respond).toHaveBeenLastCalledWith([]);
+  await route(command, config, controls(() => context('one')));
+  expect(command.respond).toHaveBeenLastCalledWith([
+    expect.objectContaining({ value: 'TBD' }),
+  ]);
 });
 
 test('ignores interactions owned by other commands', async () => {

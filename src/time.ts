@@ -410,7 +410,7 @@ function presetParts(tz: string, now: Date): Parts[] {
  * Synchronous and can't fail, like `searchTimeZones` and unlike `searchPlaces` — chrono runs
  * in-process, so there's no network here to time out.
  *
- * Every choice carries a canonical `value`, so what gets submitted is exact even though what was
+ * Dated choices carry a canonical `value`, so what gets submitted is exact even though what was
  * typed was not. Echoing the resolved instant back *before* submit is what makes loose parsing
  * safe rather than surprising, and it's why nothing is offered that the calendar rejects: past
  * instants and times daylight saving skips are dropped rather than shown and then refused.
@@ -426,6 +426,8 @@ export function searchWhen(
   if (!isValidTimeZone(tz)) return [];
 
   const text = query?.trim() ?? '';
+  const tbd = { name: 'TBD — date to be decided', value: 'TBD' };
+  if (text && 'tbd'.startsWith(text.toLowerCase())) return [tbd];
   let parts: Parts[];
   if (!text) {
     parts = presetParts(tz, now);
@@ -436,7 +438,7 @@ export function searchWhen(
   }
 
   const seen = new Set<string>();
-  return parts
+  const choices = parts
     .map((p) => canonical(p))
     .filter((value) => !seen.has(value) && seen.add(value))
     .map((value) => ({ value, at: zonedToDate(value, tz) }))
@@ -445,6 +447,8 @@ export function searchWhen(
     .sort((a, b) => a.at.getTime() - b.at.getTime())
     .slice(0, SUGGESTION_LIMIT)
     .map(({ value, at }) => ({ name: label(at, tz, now), value }));
+
+  return text ? choices : [...choices.slice(0, SUGGESTION_LIMIT - 1), tbd];
 }
 
 /** `Thu, Aug 13, 2026 · 7:00 PM · tomorrow`, inside Discord's 100-character cap on a choice. */

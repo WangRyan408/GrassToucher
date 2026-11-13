@@ -20,25 +20,25 @@ export const ephemeral = (text: string) => ({ content: text, flags: MessageFlags
 export const content = (text: string) => ({ content: text });
 
 /**
- * Resolve the `when` + `timezone` options into a Date, or return the complaint to show.
+ * Resolve a timezone for either a date change or a cadence-only edit.
  *
  * A bare string for the failure, not `{ error }`: `if (typeof x === 'string')` narrows, while
  * `if (x.error)` can't rule out the failure arm — an empty error string is falsy too.
  */
-export function parseWhen(
+export function parseTimeZone(
   interaction: ChatInputCommandInteraction,
   ctx: Ctx,
-): { startsAt: Date; tz: string } | string {
-  const raw = interaction.options.getString('when');
+  defaultTz = ctx.config.defaultTz,
+): { tz: string } | string {
   // `|| null`, not `?? null`: someone can leave a space in the box, and a blank zone means
   // "use the default" rather than "reject this".
   const requested = interaction.options.getString('timezone')?.trim() || null;
-  const tz = requested ? resolveTimeZone(requested) : ctx.config.defaultTz;
+  const tz = requested ? resolveTimeZone(requested) : defaultTz;
 
   if (!tz) {
     // Several zones matched, or none did. Either way the suggestions are the way out, so the
     // complaint leads with the nearest few.
-    const near = searchTimeZones(requested, ctx.config.defaultTz)
+    const near = searchTimeZones(requested, defaultTz)
       .slice(0, 3)
       .map((choice) => `\`${choice.value}\``)
       .join(', ');
@@ -46,16 +46,29 @@ export function parseWhen(
       ? `\`${requested}\` matches more than one timezone. Did you mean ${near}? Pick one from the list as you type.`
       : `\`${requested}\` isn't a timezone I recognise. Try a city like \`Berlin\` and pick from the list as you type.`;
   }
+  return { tz };
+}
+
+export function parseWhen(
+  interaction: ChatInputCommandInteraction,
+  ctx: Ctx,
+): { startsAt: Date | null; tz: string } | string {
+  const zone = parseTimeZone(interaction, ctx);
+  if (typeof zone === 'string') return zone;
+  const { tz } = zone;
+  const raw = interaction.options.getString('when');
+  // Keep a TBD series' chosen timezone for display and cadence-only edits.
+  if (raw?.trim().toUpperCase() === 'TBD') return { startsAt: null, tz };
   const startsAt = parseWhenInput(raw, tz);
   if (!startsAt) {
-    return `Couldn't read \`${raw}\` as a time. Try \`tomorrow 7pm\`, \`Friday 7:30 PM\` or \`Aug 15 7pm\`, and pick from the list as you type. (\`${TIME_FORMAT}\` still works; a time skipped by a daylight-saving jump won't, whichever way you write it.)`;
+    return `Couldn't read \`${raw}\` as a time. Try \`tomorrow 7pm\`, \`Friday 7:30 PM\` or \`TBD\`, and pick from the list as you type. (\`${TIME_FORMAT}\` still works; a time skipped by a daylight-saving jump won't, whichever way you write it.)`;
   }
   return { startsAt, tz };
 }
 
 /**
- * The guard both in-thread commands share: is this one of our events, and may this person
- * act on it? Kept in one place so edit and cancel can't drift on who's allowed to do what.
+ * The guard in-thread commands share: is this one of our events, and may this person
+ * act on it? Kept in one place so edit, cancel and pause agree on who can change a post.
  *
  * Returns the entry, or the complaint to show — same reason as `parseWhen`. The thread comes
  * off the interaction rather than being passed in: every caller passed `interaction.channel`.

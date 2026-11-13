@@ -7,6 +7,8 @@ import {
   time,
 } from 'discord.js';
 import type { APIEmbed, Embed, ForumChannel, Message, ThreadChannel } from 'discord.js';
+import { isRecurrenceFrequency, recurrenceLabel } from './recurrence.ts';
+import { isValidTimeZone } from './time.ts';
 import type { Event, EventEntry, RsvpChoice } from './types/event.ts';
 import { tryCatch } from './utils/tryCatch.ts';
 
@@ -16,6 +18,7 @@ export const MARKER = 'GrassToucher';
 export const COLOR_UPCOMING = 0x57f287;
 export const COLOR_PAST = 0x4f545c;
 export const COLOR_CANCELLED = 0xed4245;
+export const COLOR_PAUSED = 0xfee75c;
 
 /** Appended to the embed title and thread name. Presentation only — the footer is the truth. */
 export const CANCELLED_SUFFIX = ' — CANCELLED';
@@ -60,7 +63,10 @@ export function rsvpRow(): ActionRowBuilder<ButtonBuilder> {
 const mentions = (ids: string[]) => (ids.length ? ids.map((id) => `<@${id}>`).join(' ') : '—');
 const readIds = (value: string) => [...value.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]);
 
-type EventStatus = 'upcoming' | 'past' | 'cancelled';
+type EventStatus = 'upcoming' | 'past' | 'cancelled' | 'paused';
+
+export const isPaused = (event: Event): boolean =>
+  event.pausedUntil !== null && event.pausedUntil.getTime() > Date.now();
 
 /**
  * The one place event state is decided, so the sweep can ask "does this need a re-render?"
@@ -68,7 +74,9 @@ type EventStatus = 'upcoming' | 'past' | 'cancelled';
  */
 function eventStatus(event: Event): EventStatus {
   if (event.cancelled) return 'cancelled'; // Outranks past-grey.
-  return new Date(event.startsAt).getTime() < Date.now() ? 'past' : 'upcoming';
+  if (isPaused(event)) return 'paused';
+  if (event.recurring) return 'upcoming';
+  return event.startsAt && event.startsAt.getTime() < Date.now() ? 'past' : 'upcoming';
 }
 
 /**
@@ -82,6 +90,7 @@ export const STATUS: Record<EventStatus, { color: number; dot: string }> = {
   upcoming: { color: COLOR_UPCOMING, dot: '🟢' },
   past: { color: COLOR_PAST, dot: '⚫' },
   cancelled: { color: COLOR_CANCELLED, dot: '🔴' },
+  paused: { color: COLOR_PAUSED, dot: '🟡' },
 };
 
 export const embedColor = (event: Event): number => STATUS[eventStatus(event)].color;
@@ -125,19 +134,34 @@ export function notifyRecipients(event: Event, actorId: string): string[] {
 
 /** Build the starter-message embed that stores the event. */
 export function toEmbed(event: Event): EmbedBuilder {
-  const startsAt = new Date(event.startsAt);
+  const startsAt = event.startsAt;
 
   const embed = new EmbedBuilder()
     .setTitle(displayTitle(event, 256))
     .setColor(embedColor(event))
-    .setTimestamp(startsAt)
     .addFields({
       name: 'When',
-      value: `${time(startsAt, TimestampStyles.LongDateTime)} (${time(startsAt, TimestampStyles.RelativeTime)})`,
+      value: startsAt
+        ? `${time(startsAt, TimestampStyles.LongDateTime)} (${time(startsAt, TimestampStyles.RelativeTime)})`
+        : 'TBD',
     });
 
+  if (startsAt) embed.setTimestamp(startsAt);
   if (event.description) embed.setDescription(event.description.slice(0, 4000));
   if (event.where) embed.addFields({ name: 'Where', value: event.where.slice(0, 1024) });
+  if (event.recurring) embed.addFields({
+    name: 'Recurring',
+    value: event.recurring.frequency
+      ? `${recurrenceLabel(event.recurring)}${event.recurring.timeZone ? ` (${event.recurring.timeZone})` : ''}`
+      : 'Schedule not set. Choose one with `/event edit recurring:`.',
+    inline: true,
+  });
+  if (event.pausedUntil && isPaused(event)) {
+    embed.addFields({
+      name: 'Paused until',
+      value: `${time(event.pausedUntil, TimestampStyles.LongDateTime)} (${time(event.pausedUntil, TimestampStyles.RelativeTime)})`,
+    });
+  }
 
   embed.addFields(
     ...choiceEntries.map(([key, c]) => ({
@@ -150,6 +174,13 @@ export function toEmbed(event: Event): EmbedBuilder {
   const footer = [MARKER, `org:${event.organizerId}`];
   if (event.reminded) footer.push('reminded');
   if (event.cancelled) footer.push('cancelled');
+  if (event.recurring) {
+    footer.push('recurring');
+    if (event.recurring.frequency) footer.push(`repeat:${event.recurring.frequency}`);
+    if (event.recurring.timeZone) footer.push(`tz:${event.recurring.timeZone}`);
+    if (event.recurring.anchor) footer.push(`anchor:${event.recurring.anchor.toISOString()}`);
+  }
+  if (event.pausedUntil) footer.push(`paused:${event.pausedUntil.getTime()}`);
   return embed.setFooter({ text: footer.join(' · ') });
 }
 
@@ -161,6 +192,13 @@ export function toEmbed(event: Event): EmbedBuilder {
 export function fromEmbed(embed: Embed | APIEmbed): Event {
   const fields: readonly { name: string; value: string }[] = embed.fields ?? [];
   const footer = embed.footer?.text ?? '';
+  const markers = footer.split(' · ');
+  const paused = markers.find((marker) => /^paused:\d+$/.test(marker));
+  const pausedUntil = paused ? new Date(Number(paused.slice('paused:'.length))) : null;
+  const frequency = markers.find((marker) => marker.startsWith('repeat:'))?.slice('repeat:'.length);
+  const timeZone = markers.find((marker) => marker.startsWith('tz:'))?.slice('tz:'.length);
+  const anchorText = markers.find((marker) => marker.startsWith('anchor:'))?.slice('anchor:'.length);
+  const anchor = anchorText ? new Date(anchorText) : null;
   const byEmoji = (emoji: string) => fields.find((f) => f.name.startsWith(emoji))?.value ?? '';
 
   // Undo displayTitle. Skip this and every re-render appends another marker.
@@ -173,12 +211,20 @@ export function fromEmbed(embed: Embed | APIEmbed): Event {
   return {
     title,
     description: embed.description ?? null,
-    // `?? 0` is what `new Date(null)` already did: epoch, not Invalid Date.
-    startsAt: new Date(embed.timestamp ?? 0),
+    // Only an explicit TBD is undated; a damaged legacy record keeps its old epoch fallback.
+    startsAt: !embed.timestamp && fields.some((f) => f.name === 'When' && f.value === 'TBD')
+      ? null
+      : new Date(embed.timestamp ?? 0),
     where: fields.find((f) => f.name === 'Where')?.value ?? null,
     organizerId: /org:(\d+)/.exec(footer)?.[1] ?? null,
     reminded: footer.includes('reminded'),
     cancelled,
+    recurring: markers.includes('recurring') ? {
+      frequency: frequency && isRecurrenceFrequency(frequency) ? frequency : null,
+      timeZone: timeZone && isValidTimeZone(timeZone) ? timeZone : null,
+      anchor: anchor && Number.isFinite(anchor.getTime()) ? anchor : null,
+    } : null,
+    pausedUntil: pausedUntil && Number.isFinite(pausedUntil.getTime()) ? pausedUntil : null,
     // Spelled out rather than looped: `rsvp` must be a complete Rsvp, so adding a fourth
     // choice fails here at compile time instead of producing a half-filled record.
     rsvp: {
@@ -250,27 +296,45 @@ export async function readEvent(
 }
 
 /**
- * Every event in the forum, soonest first.
+ * Every event in the forum, soonest first, with TBD dates after scheduled ones.
  *
  * Archived posts are included on purpose: forum posts auto-archive after inactivity, so
  * an upcoming event nobody chats in would otherwise vanish from the digest.
  *
- * ponytail: only the 100 most recently archived posts are checked. Paginate with
- * `before` if a forum ever accumulates enough old posts to hide a future event.
+ * Recurring events can outlive any archive page, so stopping after the newest 100 would
+ * silently remove them from the digest even though nobody paused them.
  */
 export async function listEvents(
   forum: ForumChannel,
   clientUserId: string,
 ): Promise<EventEntry[]> {
-  const [active, archived] = await Promise.all([
+  const [active, firstPage] = await Promise.all([
     forum.threads.fetchActive(),
     forum.threads.fetchArchived({ limit: 100 }),
   ]);
 
-  const threads = [...active.threads.values(), ...archived.threads.values()];
-  const entries = await Promise.all(threads.map((thread) => readEvent(thread, clientUserId)));
+  const threads = new Map([...active.threads, ...firstPage.threads]);
+  let page = firstPage;
+  let before = Infinity;
+  while (page.hasMore) {
+    const oldest = Math.min(...[...page.threads.values()].map((thread) => thread.archiveTimestamp ?? Infinity));
+    if (!Number.isFinite(oldest) || oldest >= before) {
+      throw new Error('Could not advance through archived event posts.');
+    }
+    before = oldest;
+    page = await forum.threads.fetchArchived({ limit: 100, before: new Date(before) });
+    for (const [id, thread] of page.threads) threads.set(id, thread);
+  }
+  const entries = await Promise.all([...threads.values()].map((thread) => readEvent(thread, clientUserId)));
 
   return entries
     .filter((entry) => entry !== null)
-    .sort((a, b) => a.event.startsAt.getTime() - b.event.startsAt.getTime());
+    .sort(compareEvents);
+}
+
+/** Shared with the digest because an occurrence can move after the forum was read. */
+export function compareEvents(a: EventEntry, b: EventEntry): number {
+  if (!a.event.startsAt) return b.event.startsAt ? 1 : 0;
+  if (!b.event.startsAt) return -1;
+  return a.event.startsAt.getTime() - b.event.startsAt.getTime();
 }

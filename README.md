@@ -3,8 +3,8 @@
 Discord bot to create and manage events in discord threads.
 
 `/event create` opens a forum post for an event, with RSVP buttons on it. One pinned message
-in a board channel lists every upcoming event, and attendees get a ping before the start time.
-One bot serves every server that invites it; no guild ID is needed.
+in a board channel lists every upcoming or undated event, and attendees get a ping before a
+scheduled start time. One bot serves every server that invites it; no guild ID is needed.
 
 Discord stores each event record in its forum post's embed, and the digest is found by looking up
 the bot's own pin. SQLite stores the forum and digest channel IDs for each server in one shared
@@ -93,9 +93,10 @@ available. Each sweep checks the selected channels too.
 | Command | Notes |
 |---|---|
 | `/setup forum: digest:` | Requires Manage Server. Selects both channels for this server, validates permissions and saves setup in SQLite. Run it again to change the selection. |
-| `/event create title: when: [where:] [description:] [timezone:]` | `when` takes what you'd say out loud and previews the resolved time as you type. `timezone` accepts a city (`Berlin`), an abbreviation (`PST`) or a full IANA name, and defaults to `DEFAULT_TZ`. |
-| `/event edit [title:] [when:] [where:] [description:] [timezone:] [uncancel:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. `uncancel: True` brings a cancelled event back. |
+| `/event create title: when: [where:] [description:] [timezone:] [recurring:]` | `when` takes what you'd say out loud and previews the resolved time as you type; use `TBD` for a date still to be decided. `timezone` accepts a city (`Berlin`), an abbreviation (`PST`) or a full IANA name, and defaults to `DEFAULT_TZ`. Optional `recurring` choices: `daily`, `weekly`, `bi-weekly`, `monthly`. |
+| `/event edit [title:] [when:] [where:] [description:] [timezone:] [uncancel:] [recurring:]` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. Set `when:TBD` to clear a date, or supply a time to schedule an undated event. `recurring` changes the cadence; `none` stops repeating. `uncancel: True` brings a cancelled event back. |
 | `/event cancel` | Run it **inside the event's thread**. Asks you to confirm, then marks the post CANCELLED and DMs everyone who RSVP'd. |
+| `/event pause duration:` | Run it **inside the event's thread**. Organizer or anyone with Manage Threads. Hides only that post from the digest for `30m`, `2h`, `3d`, `1 week`, etc., then the pause expires automatically. |
 
 Times are stored as an instant and rendered with Discord's own timestamp markup, so everyone reads
 them in their own local timezone.
@@ -105,6 +106,17 @@ them in their own local timezone.
 `when:` reads what you'd say out loud — `tomorrow 7pm`, `friday 7:30 PM`, `Aug 15 7pm`,
 `in 2 hours`, `next saturday`, `7:30` on its own. The old `YYYY-MM-DD HH:MM` still works, and is
 still what gets submitted under the hood.
+
+Use `when:TBD` when the date hasn't been decided. It accepts any capitalization and appears in
+autocomplete. `when` is still required on create; blank or unreadable text is rejected. Omitting
+`when` on edit keeps the existing date, while `when:TBD` clears it.
+
+Undated posts show **When: TBD**, keep their green status dot unless cancelled or paused, and appear
+after scheduled events in the digest. The embed stores TBD explicitly, so it survives a restart. They
+receive no reminders and the bot won't archive them as finished; Discord's normal inactivity
+archiving still applies. Use `/event edit when:tomorrow 7pm` to schedule one later. Changing the
+date resets its reminder so attendees can be pinged for the new time. An undated event stays in
+the digest until it is given a date, paused, or its post is deleted, including if it is cancelled.
 
 The dropdown echoes the resolved time back **before** you submit — `Sat, Aug 15, 2026 · 7:30 PM
 PDT · in 3 days`. That preview is what makes loose parsing safe rather than surprising: you see
@@ -175,18 +187,68 @@ that never observes daylight saving, so a July event booked in "EST" landed an h
 means `America/New_York`. Ambiguous ones are left out rather than guessed — `IST` is India, Ireland
 *and* Israel, so it falls through to the candidate list.
 
+## Recurring events and pauses
+
+Create a recurring post with:
+
+```
+/event create title:Weekly walk when:tomorrow 7pm recurring:weekly timezone:America/Los_Angeles
+```
+
+`recurring` is optional and accepts `daily`, `weekly`, `bi-weekly` (every 14 days), or `monthly`.
+Omit it for a one-off event. The post and digest show its cadence. When the start time is reached,
+the next sweep updates **the same post** and digest to the next future occurrence, normally within
+ten minutes. Existing RSVPs carry over; the reminder marker resets for the new occurrence.
+
+The event stores the selected timezone and original calendar date in its embed. Daily and weekly
+events keep the same local clock time across daylight-saving changes. Monthly events use the
+original day, clamped to the month's last day when necessary: January 31 → February 28 → March 31.
+A clock time skipped by daylight saving skips that occurrence, keeping later ones at the chosen
+clock time. A restart skips missed occurrences directly, without a burst of old reminders.
+
+`when:TBD` also works with a cadence; automatic advancement waits until a date is assigned.
+`/event edit when:` assigns a new anchor date. As with create and autocomplete, its timezone is
+the explicit `timezone:` option or `DEFAULT_TZ` if omitted. `/event edit recurring:` changes the
+cadence without moving the current instant; `recurring:none` stops repeating. An unrelated title
+or description edit leaves the original anchor intact. Old boolean recurring records stay listed
+with **Schedule not set** until an organizer chooses a cadence with `/event edit recurring:`.
+
+Recurring posts stay in the digest and the bot doesn't archive them as finished. Discord may
+still archive a quiet post; the bot searches every archive page and reopens the post when its
+next occurrence needs updating. Cancelled recurring posts stay listed, struck through, and don't
+advance until reinstated.
+
+To take a post out of the digest temporarily, run this **inside that post**:
+
+```
+/event pause duration:3d
+```
+
+Only the organizer or someone with **Manage Threads** can pause it. There is no target-channel
+option: the command changes only the event post it's run in, within this server's configured
+forum. It also works on one-off events. Durations accept minutes, hours, days or weeks, including
+decimals such as `1.5h`; a day means 24 hours. Running pause again replaces the deadline from now.
+
+Pausing hides the entry immediately, adds **Paused until** to its post and turns its status dot
+yellow. It leaves RSVPs intact and suppresses reminders and date advancement during the pause.
+Both the schedule and exact pause deadline live in the event embed, so restarts don't lose them.
+Once the deadline passes, the next sweep catches up to the next future occurrence and restores
+the recurring post to the digest, normally within ten minutes or on startup. A paused one-off
+returns if it still meets the normal date cutoff. Cancelled posts keep their red status while paused.
+
 ## Post status
 
-Every forum post's name opens with a dot saying where its event stands: 🟢 still to come, ⚫ started
-or done, 🔴 cancelled. That reads from the channel list, which the embed colour inside the post
-can't reach. An emoji is all that's available — Discord won't colour a thread name, and its only
+Every forum post's name opens with a dot saying where its event stands: 🟢 upcoming or recurring,
+⚫ started or done, 🟡 paused, 🔴 cancelled. That reads from the channel list, which the embed colour
+inside the post can't reach. An emoji is all that's available — Discord won't colour a thread name, and its only
 genuinely coloured text is an ANSI block, which can't hold a link.
 
 The dot and the colour come off one rule, paired in a single `STATUS` record so they can't drift,
 and both follow **event state** rather than archive state. Those look like the same question and
 aren't: posts auto-archive after a week of quiet, so an upcoming event nobody chats in would go
 red — and renaming an archived thread reopens it, so a dot meaning "archived" destroys the thing it
-reports. The sweep only renames open posts, and sets the final dot on the way out.
+reports. The sweep only renames open posts, and sets the final dot on the way out. A recurring
+rollover intentionally reopens its post so its new date can be saved.
 
 So a post archived before this landed keeps its undotted name until something reopens it, and an
 open post's name is fully derived — the sweep puts a hand-edited one back within ten minutes.
@@ -198,8 +260,9 @@ Retitle with `/event edit title:`, which changes both.
 strikes the title through, drops the RSVP buttons, and DMs Going + Maybe plus the organizer with the
 event name, the server, the old start time and a link back. The digest keeps the event listed but
 struck through until its start time passes, so anyone who missed the DM still sees what happened.
-The DM is best effort — a member with server DMs off just won't get one, and the confirmation says
-how many couldn't be reached.
+Recurring and undated events stay listed until paused or deleted. The DM is best effort — a
+member with server DMs off just won't get one, and the confirmation says how many couldn't be
+reached.
 
 `/event edit uncancel: True` reverses all of it — marker off, dot and embed back to green, buttons
 back with everyone's answers intact — down to a second DM to the same people, because anyone who
@@ -211,7 +274,7 @@ marks it. The digest catches up a second later, since the bot watches for thread
 than waiting for the sweep. Archiving does *not* cancel: archived posts stay in the digest on
 purpose, since an event nobody chats in shouldn't vanish.
 
-Only the organizer or someone with Manage Threads can edit or cancel. The *bot* authors every event
+Only the organizer or someone with Manage Threads can edit, cancel or pause. The *bot* authors every event
 post, so Discord's own "delete post" is mod-only here — which is why cancelling is a command.
 
 ## Development
@@ -234,7 +297,9 @@ between servers. Discord I/O is stubbed; the suite makes no network calls.
 
 | File | Job |
 |---|---|
-| `src/index.ts` | Boot, per-guild contexts and lifecycle, the 10-minute sweep |
+| `src/index.ts` | Boot, per-guild contexts and lifecycle, schedules the 10-minute sweep |
+| `src/sweep.ts` | Recurring occurrence updates, reminders, status updates and archiving for finished events |
+| `src/recurrence.ts` | Cadence choices and calendar arithmetic using the event's stored timezone and anchor |
 | `src/config.ts` | Environment validation and defaults |
 | `src/database.ts` | Per-guild SQLite setup records and schema initialization |
 | `src/context.ts` | Per-guild setup cache and validation of the explicitly selected channels |
@@ -242,7 +307,7 @@ between servers. Discord I/O is stubbed; the suite makes no network calls.
 | `src/event.ts` | The model: embed codec, forum listing, RSVP rules, the status rule |
 | `src/digest.ts` | Renders the digest and edits the pin in place |
 | `src/interactions.ts` | Assembles `/event` from `src/commands/`, routes interactions, owns the RSVP buttons and autocomplete |
-| `src/commands/create.ts` · `edit.ts` · `cancel.ts` | One file per subcommand: its slice of the `/event` definition beside the handler that serves it. `cancel.ts` also owns the confirm button and the DMs |
+| `src/commands/create.ts` · `edit.ts` · `cancel.ts` · `pause.ts` | One file per subcommand: its slice of the `/event` definition beside the handler that serves it. `cancel.ts` also owns the confirm button and the DMs |
 | `src/commands/setup.ts` | Defines `/setup`, checks Manage Server and confirms the saved channel selection |
 | `src/commands/shared.ts` | What more than one subcommand needs: reply shapes, `when:`/`timezone:` parsing, the organizer-or-mod guard |
 | `src/places.ts` | Address lookup for `where:` — Photon adapter and label formatting |
@@ -290,6 +355,8 @@ Not commitments — what's worth doing next, and what's already landed.
 
 | Status | Change | The finding, and what it costs |
 |:---:|---|---|
+| ✅ | **Recurring posts and timed pauses** | Optional `daily`, `weekly`, `bi-weekly` or `monthly` advances the same post to its next occurrence; `/event pause duration:3d` hides only the post it's run in until the deadline expires. The finding: fixed millisecond intervals drift across daylight saving, and advancing from February's clamped date loses a January 31 anchor. Costs: cadence, timezone and original date stored in the embed, calendar arithmetic with month-end clamping, full archive discovery, and one sweep of up to ten minutes before rollover or pause recovery. RSVPs carry over, reminders reset, and restarts jump over missed occurrences. Old boolean records need an explicit cadence selection. |
+| ✅ | **TBD event dates** | `when:TBD` creates an undated event or clears an existing date; an ordinary `when:` schedules it later. The finding: the start time also drives the embed codec, digest order, status and sweep, so accepting one extra word in the slash command wasn't enough. Costs: a nullable start time stored as an explicit **When: TBD** field, undated events listed after scheduled ones, and reminders and timed archiving held until a date exists. Date changes reset the reminder marker. |
 | ✅ | **Run across servers without env IDs** | Global commands and a separate context for each server, with `/setup forum: digest:` choosing both channels explicitly. The finding: channel names cannot tell you which forum an admin intended, and in-memory setup disappears with the container. One SQLite `guild_config` table stores channel IDs by guild; a named Docker volume carries it across container replacement. Costs: Manage Server for setup, Pin Messages for the digest, a one-time scan to migrate old pinned setup records, and one channel fetch per server per sweep. Every event command and button stays blocked until both channels are configured. Back up the volume; `docker compose down -v` removes it. |
 | ❌ | **Self-host Photon** | The public instance disclaims its own availability, and on 2026-08-12 spent ~30s per query against a 2s budget — indistinguishable from down. Code cost is one env var (`ENDPOINT` in `src/places.ts`); the rest is operational, and that's the catch — Java 21+, a search index, and a 64GB RAM recommendation at planet scale, so a 16GB box means a country dump and a capped heap. Plausible, untested. Hosted providers want an account and a key, the exact thing Photon avoided. |
 | ✅ | **Status dots on post names** | 🟢/⚫/🔴 on post names, so state reads from the channel list. The finding: **archive state can't carry it** — renaming an archived thread reopens it, so a dot meaning "archived" destroys what it reports, and auto-archive-on-quiet would redden upcoming events anyway. Discord won't colour a thread name either, so the dot follows event state off the existing `embedColor` rule. Costs: a post now greys at its start time rather than at archive time, one rename per state change against a 2-per-10-min limit, and posts archived before this keep undotted names. |
