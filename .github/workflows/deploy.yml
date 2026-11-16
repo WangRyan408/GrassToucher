@@ -31,65 +31,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: production # Add required reviewers here if you ever want deploys gated.
     env:
-      # The host's LAN address, reached through the tunnel — see the tunnel step below. NOT
-      # 10.13.13.1, which two different WireGuard instances on that box both claim: the live
-      # NetworkManager-owned `wg0` on the host, and the linuxserver container nothing routes to.
-      # One of them has sshd and the other doesn't, and the address alone doesn't say which you
-      # get. `192.168.50.9` is unambiguous, and it's the single /32 that WG_CONFIG's AllowedIPs
-      # permits — the same path every other peer already uses to reach services on this box.
-      #
-      # Deliberately a literal and not a secret: an RFC1918 address only reachable through the
-      # tunnel reveals nothing, and reading it here beats an opaque secret when a deploy misbehaves.
-      SSH_HOST: 192.168.50.9
+      SSH_HOST: 35.212.142.38
       SSH_USER: ${{ secrets.SSH_USER }}
       # The automatic path deploys the exact commit that was just built, not `latest`, so
       # `docker compose ps` on the host names the running commit.
       TAG: ${{ inputs.tag || github.event.workflow_run.head_sha }}
     steps:
-      # The host is behind NAT — there is no public address to SSH to, and the only port forwarded
-      # at the router is WireGuard's. So the runner joins the tunnel as a peer named `ci` and
-      # reaches sshd over it.
-      #
-      # WG_CONFIG is a hand-edited copy of the generated `peer_ci.conf`, and both edits matter.
-      # AllowedIPs is 192.168.50.9/32 and nothing else — the generated file offers the whole
-      # 192.168.50.0/24, which would put every other service in the house one leaked secret away.
-      # And `Endpoint` must name port **51820**: the generator writes 51821 because that is what
-      # the container publishes, but the router forwards 51820 to the host's own wg0, so a config
-      # trusting the generated port is dropped at the router with no error anywhere.
-      - name: Join the tunnel
-        env:
-          WG_CONFIG: ${{ secrets.WG_CONFIG }}
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends wireguard-tools
-          # chmod rather than relying on umask: sudo resets it, and wg-quick warns about a
-          # world-readable private key.
-          printf '%s\n' "$WG_CONFIG" | sudo tee /etc/wireguard/wg0.conf > /dev/null
-          sudo chmod 600 /etc/wireguard/wg0.conf
-          sudo wg-quick up wg0
-
-          # `wg-quick up` configures an interface; it never handshakes, so it exits 0 even when the
-          # far end is unreachable. WireGuard then retries in silence — no error, no ICMP — and the
-          # first thing to actually notice would be ssh timing out, which reads identically to a
-          # dead sshd or a wrong key. A ping makes the tunnel own its own failures.
-          #
-          # The handshake is triggered by the first outbound packet, so the ping is both the test
-          # and the trigger. Three attempts rather than one: a single 5s window can't tell a dead
-          # path from a slow first handshake, and guessing wrong costs a whole CI round trip.
-          for i in 1 2 3; do
-            if ping -c1 -W5 "$SSH_HOST"; then reached=1; break; fi
-            echo "attempt $i: no reply"
-          done
-
-          # This is what a bare ping failure can't tell you, and not knowing it cost an afternoon.
-          # A completed handshake with no ping reply means routing or firewall on the host. NO
-          # handshake means the packets never reached a WireGuard instance that could authenticate
-          # them at all — the router's UDP forward, or a stale Endpoint — and the credentials are
-          # not the thing to go re-checking.
-          sudo wg show
-
-          [[ -n ${reached:-} ]]
-
       # No actions/checkout: this workflow only opens an SSH connection.
       - name: Load the deploy key
         # Secrets arrive through `env`, never interpolated into the script body — a `${{ }}`
@@ -120,9 +67,4 @@ jobs:
             -o StrictHostKeyChecking=yes \
             "$SSH_USER@$SSH_HOST" "$TAG"
 
-      # Runners are torn down after the job, so this is hygiene rather than necessity — but it runs
-      # on failure too, so a deploy that dies mid-SSH still leaves a clean log line about the
-      # tunnel going down instead of an interface nobody closed.
-      - name: Leave the tunnel
-        if: always()
-        run: sudo wg-quick down wg0 || true
+
