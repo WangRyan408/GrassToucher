@@ -144,6 +144,10 @@ export function toEmbed(event: Event): EmbedBuilder {
       value: startsAt
         ? `${time(startsAt, TimestampStyles.LongDateTime)} (${time(startsAt, TimestampStyles.RelativeTime)})`
         : 'TBD',
+    })
+    .addFields({
+      name: 'Created by',
+      value: event.organizerId ? `<@${event.organizerId}>` : 'Unknown',
     });
 
   if (startsAt) embed.setTimestamp(startsAt);

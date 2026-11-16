@@ -274,8 +274,9 @@ marks it. The digest catches up a second later, since the bot watches for thread
 than waiting for the sweep. Archiving does *not* cancel: archived posts stay in the digest on
 purpose, since an event nobody chats in shouldn't vanish.
 
-Only the organizer or someone with Manage Threads can edit, cancel or pause. The *bot* authors every event
-post, so Discord's own "delete post" is mod-only here — which is why cancelling is a command.
+The post shows its organizer in the embed. Only the organizer or someone with Manage Threads can
+edit, cancel or pause. The *bot* authors every event post, so Discord's own "delete post" is mod-only
+here — which is why cancelling is a command.
 
 ## Development
 
